@@ -3,13 +3,13 @@ COMMODEX — Central Configuration
 Single source of truth for all system parameters.
 Never import from .env directly elsewhere — always go through config.py.
 
-Version: 1.1
-Changes from 1.0:
-  - LOT_CONFIG updated with correct pl_per_tick from MCX specs
-  - Margin changed from static INR to percentage-based (margin_pct)
-  - Silver contracts added but marked active=False (v2 scope)
-  - ACTIVE_COMMODITIES list added
-  - Position sizing formula updated to use pl_per_tick x stop_ticks
+Version: 2.0
+Changes from 1.1:
+  - Added v2.0 technical indicator thresholds (ADX, VWAP, BB, OI, Supertrend)
+  - Position sizing: added underlotted detection + margin sufficiency check
+  - Added B-grade confidence reduction percentage
+  - Margin sanity check at startup now uses real estimates instead of pass
+  - Added RISK_OVERBUDGET_BLOCK_MULTIPLIER for underlotted safety gate
 """
 
 import os
@@ -315,6 +315,11 @@ ACTIVE_LOT_CONFIG = {
 # position_size_lots  = min(position_size_lots, MAX_LOTS_PER_SIGNAL)
 # position_size_lots  = max(position_size_lots, 1)
 #
+# v2.0 addition:
+#   If raw_lots < 1.0, the trade is "underlotted" — 1 lot forced
+#   but actual risk exceeds budget. If actual risk > budget × 1.5
+#   (RISK_OVERBUDGET_BLOCK_MULTIPLIER), the signal is blocked.
+#
 # Example — GOLDM:
 #   capital=₹1,00,000  risk=2.5%  → risk_budget = ₹2,500
 #   entry=71,450  stop=71,435  → stop_distance = 15 ticks
@@ -326,6 +331,14 @@ ACTIVE_LOT_CONFIG = {
 #   entry=6,500  stop=6,450  → stop_distance = 50 ticks
 #   pl_per_tick = ₹10  → risk_per_lot = 50 × 10 = ₹500
 #   lots = floor(2500 / 500) = 5 → capped at MAX_LOTS = 3
+#
+# Example — Underlotted (GOLDM wide stop):
+#   risk_budget = ₹2,500
+#   entry=71,450  stop=71,100  → stop_distance = 350 ticks
+#   risk_per_lot = 350 × 10 = ₹3,500 > budget of ₹2,500
+#   raw_lots = 0.71 → forced to 1 lot → actual risk = ₹3,500
+#   actual/budget = 1.4 < 1.5 → WARNING but allowed
+#   If stop=70,800 → risk_per_lot = ₹6,500 → ratio 2.6 → BLOCKED
 # ─────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────
@@ -347,6 +360,14 @@ MAX_LOTS_PER_SIGNAL      = 3            # hard cap regardless of sizing formula
 MIN_CONFIDENCE_THRESHOLD = 55           # below this → signal shown as HOLD
 MIN_RR_RATIO             = 1.5          # minimum acceptable risk:reward
 
+# v2.0: Underlotted safety gate
+# If actual risk for 1 forced lot exceeds budget × this multiplier → block
+RISK_OVERBUDGET_BLOCK_MULTIPLIER = 1.5
+
+# v2.0: B-grade position reduction
+# B-grade signals (confidence 55-74%) reduce position size by this factor
+B_GRADE_POSITION_REDUCTION = 0.5
+
 # INR/USD volatility gate (Guardrail 9)
 INR_VOLATILITY_GATE_PCT  = 0.5          # if INR moves > 0.5% intraday → cap confidence
 
@@ -355,12 +376,58 @@ CONFIDENCE_CAP_NO_NEWS        = 65      # news fetch failed
 CONFIDENCE_CAP_HIGH_IMPACT    = 60      # high impact event in next 24h
 CONFIDENCE_CAP_INR_VOLATILE   = 60      # INR/USD move > gate threshold
 
+# Margin utilisation threshold
+# Block signal if margin_required > this % of available capital
+MARGIN_UTILISATION_MAX_PCT    = 80      # don't use more than 80% of capital as margin
+
+# ─────────────────────────────────────────────────────────────────
+# v2.0 TECHNICAL INDICATOR THRESHOLDS
+#
+# Externalised from technical_engine.py so they can be tuned
+# during paper trading without touching engine code.
+# ─────────────────────────────────────────────────────────────────
+
+# ADX — Trend strength classification
+ADX_RANGING_THRESHOLD    = 20       # below this = no meaningful trend
+ADX_TRENDING_THRESHOLD   = 25       # above this = directional trend
+ADX_STRONG_THRESHOLD     = 40       # above this = strong trend (trail stops)
+
+# VWAP — Price-to-VWAP distance thresholds
+VWAP_PREMIUM_PCT         = 0.3      # % above VWAP to flag as "premium" price
+VWAP_DISCOUNT_PCT        = 0.3      # % below VWAP to flag as "discount" price
+
+# Bollinger Band squeeze — breakout detection
+BB_SQUEEZE_TOLERANCE     = 1.05     # within 5% of 20-period min width = squeeze active
+
+# Open Interest — minimum change % to classify as meaningful
+OI_CHANGE_THRESHOLD_PCT  = 1.0      # ±1% OI change = meaningful (fresh longs/shorts/etc.)
+
+# Supertrend — indicator parameters
+SUPERTREND_PERIOD        = 10       # ATR period for supertrend
+SUPERTREND_MULTIPLIER    = 3.0      # ATR multiplier
+
+# RSI Divergence — lookback and pivot detection
+RSI_DIVERGENCE_LOOKBACK  = 30       # candles to search for divergence
+RSI_PIVOT_ORDER          = 5        # bars on each side for pivot detection
+
+# Fibonacci — swing detection
+FIB_LOOKBACK_CANDLES     = 50       # candles to search for swing H/L
+FIB_PIVOT_ORDER          = 5        # bars on each side for swing detection
+
+# StochRSI — threshold levels
+STOCH_RSI_OVERBOUGHT     = 80       # above this = overbought
+STOCH_RSI_OVERSOLD       = 20       # below this = oversold
+
+# Volume-price confirmation — volume ratio threshold
+VOLUME_CONFIRM_RATIO     = 1.2      # volume >= 1.2× average = "high" for confirmation
+
 # ─────────────────────────────────────────────────────────────────
 # CACHE SETTINGS (minutes)
 # ─────────────────────────────────────────────────────────────────
 CACHE_OHLCV_INTRADAY_MIN = 5
 CACHE_OHLCV_DAILY_MIN    = 60
 CACHE_NEWS_MIN           = 60
+CACHE_INR_USD_MIN        = 15       # v2.0: explicit INR/USD cache TTL
 
 # ─────────────────────────────────────────────────────────────────
 # PATHS
@@ -379,50 +446,70 @@ def validate_config() -> list[str]:
     Returns list of warning strings.
     Does not raise — lets the app display warnings gracefully.
     """
-    warnings = []
+    config_warnings = []
 
     if not GROWW_API_KEY or GROWW_API_KEY == "your_api_key_here":
-        warnings.append("GROWW_API_KEY not set in .env")
+        config_warnings.append("GROWW_API_KEY not set in .env")
 
     if not GROWW_API_SECRET or GROWW_API_SECRET == "your_api_secret_here":
-        warnings.append("GROWW_API_SECRET not set in .env")
+        config_warnings.append("GROWW_API_SECRET not set in .env")
 
     if TRADING_MODE == "demo":
         if not ACTIVE_LLM["api_key"] or \
            ACTIVE_LLM["api_key"] == "your_openai_key_here":
-            warnings.append("OPENAI_API_KEY not set — demo LLM will not work")
+            config_warnings.append(
+                "OPENAI_API_KEY not set — demo LLM will not work"
+            )
 
     if TRADING_MODE in ("paper", "production"):
         if not ACTIVE_LLM["api_key"] or \
            ACTIVE_LLM["api_key"] == "your_anthropic_key_here":
-            warnings.append(
+            config_warnings.append(
                 "ANTHROPIC_API_KEY not set — paper/production LLM will not work"
             )
 
+    if not TAVILY_API_KEY:
+        config_warnings.append(
+            "TAVILY_API_KEY not set — news context will be unavailable"
+        )
+
     if CAPITAL_INR < 10000:
-        warnings.append(
+        config_warnings.append(
             f"CAPITAL_INR is ₹{CAPITAL_INR:,.0f} — "
             f"too low for MCX margin requirements"
         )
 
-    # Margin sanity check against active contracts
+    # Margin sanity check against active contracts at typical prices
+    # Uses conservative price estimates to warn if capital is insufficient
+    TYPICAL_PRICES = {
+        "GOLDM":      71000,    # ₹71,000 per 10g (approx March 2026)
+        "CRUDEOILM":  6500,     # ₹6,500 per barrel (approx)
+    }
     for symbol in ACTIVE_COMMODITIES:
         cfg = LOT_CONFIG.get(symbol, {})
-        if cfg:
-            # Conservative margin estimate at a typical price
-            # GOLDM at ~₹71,000/10g: contract value = 71000 × 10 = ₹7,10,000
-            # margin = 8.25% = ~₹58,575 per lot
-            # CRUDEOILM at ~₹6,500/bbl: contract value = 6500 × 10 = ₹65,000
-            # margin = 34.25% = ~₹22,263 per lot
-            pass  # detailed margin check happens in RiskEngine with live prices
+        typical_ltp = TYPICAL_PRICES.get(symbol)
+        if cfg and typical_ltp:
+            margin_1_lot = get_margin_estimate_inr(symbol, typical_ltp)
+            if margin_1_lot > CAPITAL_INR:
+                config_warnings.append(
+                    f"{cfg['friendly_name']}: margin for 1 lot ≈ "
+                    f"₹{margin_1_lot:,.0f} exceeds capital ₹{CAPITAL_INR:,.0f}. "
+                    f"You cannot trade this contract."
+                )
+            elif margin_1_lot > CAPITAL_INR * 0.6:
+                config_warnings.append(
+                    f"{cfg['friendly_name']}: margin for 1 lot ≈ "
+                    f"₹{margin_1_lot:,.0f} uses {margin_1_lot/CAPITAL_INR*100:.0f}% "
+                    f"of capital. Consider increasing CAPITAL_INR."
+                )
 
     if TRADING_MODE == "production":
-        warnings.append(
+        config_warnings.append(
             "⚠ PRODUCTION MODE ACTIVE — real money at risk. "
             "Ensure paper trading validation is complete."
         )
 
-    return warnings
+    return config_warnings
 
 
 def get_margin_estimate_inr(symbol: str, ltp: float) -> float:
@@ -455,6 +542,7 @@ def get_position_size(
     stop_loss: float,
     capital: float = None,
     risk_pct: float = None,
+    signal_quality: str = None,
 ) -> dict:
     """
     Calculate position size using pl_per_tick method.
@@ -462,6 +550,12 @@ def get_position_size(
 
     This is the authoritative position sizing function.
     Risk Agent uses this output — never computes independently.
+
+    v2.0 additions:
+    - B-grade position reduction (50% of calculated lots)
+    - Underlotted detection (raw_lots < 1.0)
+    - Margin sufficiency check (margin vs capital threshold)
+    - Risk overbudget blocking (actual_risk > budget × 1.5 → blocked)
     """
     cfg = LOT_CONFIG.get(symbol)
     if not cfg:
@@ -478,24 +572,61 @@ def get_position_size(
     if risk_per_lot_inr <= 0:
         return {"error": "Stop loss equals entry price"}
 
-    raw_lots      = risk_budget_inr / risk_per_lot_inr
+    raw_lots = risk_budget_inr / risk_per_lot_inr
+
+    # v2.0: B-grade signals get reduced position size
+    if signal_quality == "B":
+        raw_lots = raw_lots * B_GRADE_POSITION_REDUCTION
+
     position_lots = max(1, min(int(raw_lots), MAX_LOTS_PER_SIGNAL))
     actual_risk   = position_lots * risk_per_lot_inr
 
-    return {
-        "symbol":               symbol,
-        "entry_price":          entry_price,
-        "stop_loss":            stop_loss,
-        "stop_distance":        round(stop_distance, 2),
-        "stop_distance_ticks":  round(stop_distance_ticks, 1),
-        "pl_per_tick":          cfg["pl_per_tick"],
-        "risk_per_lot_inr":     round(risk_per_lot_inr, 2),
-        "risk_budget_inr":      round(risk_budget_inr, 2),
-        "raw_lots_calculated":  round(raw_lots, 2),
-        "position_lots":        position_lots,
-        "capped_at_max":        raw_lots > MAX_LOTS_PER_SIGNAL,
-        "actual_risk_inr":      round(actual_risk, 2),
-        "actual_risk_pct":      round(actual_risk / capital * 100, 2),
-        "margin_est_inr":       get_margin_estimate_inr(symbol, entry_price),
-    }
+    # v2.0: Underlotted detection
+    # When raw_lots < 1.0, we're forced to use 1 lot which exceeds
+    # the risk budget. Flag this and check if it's dangerously over.
+    underlotted = raw_lots < 1.0
+    risk_overbudget_ratio = actual_risk / risk_budget_inr if risk_budget_inr > 0 else 0
+    risk_blocked = (
+        underlotted
+        and risk_overbudget_ratio > RISK_OVERBUDGET_BLOCK_MULTIPLIER
+    )
 
+    # v2.0: Margin sufficiency check
+    margin_1_lot  = get_margin_estimate_inr(symbol, entry_price)
+    margin_total  = margin_1_lot * position_lots
+    margin_pct_of_capital = (margin_total / capital * 100) if capital > 0 else 100
+    margin_sufficient = margin_pct_of_capital <= MARGIN_UTILISATION_MAX_PCT
+
+    return {
+        "symbol":                symbol,
+        "entry_price":           entry_price,
+        "stop_loss":             stop_loss,
+        "stop_distance":         round(stop_distance, 2),
+        "stop_distance_ticks":   round(stop_distance_ticks, 1),
+        "pl_per_tick":           cfg["pl_per_tick"],
+        "risk_per_lot_inr":      round(risk_per_lot_inr, 2),
+        "risk_budget_inr":       round(risk_budget_inr, 2),
+        "raw_lots_calculated":   round(raw_lots, 2),
+        "position_lots":         position_lots,
+        "capped_at_max":         raw_lots > MAX_LOTS_PER_SIGNAL,
+        "actual_risk_inr":       round(actual_risk, 2),
+        "actual_risk_pct":       round(actual_risk / capital * 100, 2),
+        "margin_est_inr":        round(margin_total, 2),
+        "margin_est_per_lot":    round(margin_1_lot, 2),
+        "margin_pct_of_capital": round(margin_pct_of_capital, 1),
+        "margin_sufficient":     margin_sufficient,
+        # v2.0 safety fields
+        "underlotted":           underlotted,
+        "risk_overbudget_ratio": round(risk_overbudget_ratio, 2),
+        "risk_blocked":          risk_blocked,
+        "risk_block_reason":     (
+            f"Stop too wide: 1 lot risks ₹{actual_risk:,.0f} "
+            f"({risk_overbudget_ratio:.1f}× budget of ₹{risk_budget_inr:,.0f}). "
+            f"Max allowed: {RISK_OVERBUDGET_BLOCK_MULTIPLIER}×."
+        ) if risk_blocked else (
+            f"Margin insufficient: ₹{margin_total:,.0f} "
+            f"({margin_pct_of_capital:.0f}% of capital, "
+            f"max {MARGIN_UTILISATION_MAX_PCT}%)."
+        ) if not margin_sufficient else None,
+        "b_grade_reduced":       signal_quality == "B",
+    }
