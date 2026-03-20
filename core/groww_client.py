@@ -305,6 +305,127 @@ class GrowwClient:
             logger.error(f"get_margin failed: {e}")
             return {}
 
+    # ── Order Execution (Production Only) ──────────────────────────
+
+    def place_mcx_order(
+        self,
+        trading_symbol:   str,
+        transaction_type: str,
+        lots:             int,
+        order_type:       str   = "MARKET",
+        price:            float = 0.0,
+        reference_id:     str   = None,
+    ) -> dict:
+        """
+        Place an MCX NRML order.
+
+        trading_symbol:   e.g. "GOLDM03APR26FUT"
+        transaction_type: "BUY" or "SELL"
+        lots:             number of lots
+        order_type:       "MARKET" or "LIMIT"
+        price:            limit price (ignored for MARKET orders)
+
+        Returns dict with groww_order_id and status.
+        Only callable when TRADING_MODE == "production".
+        """
+        from config import TRADING_MODE
+        if TRADING_MODE != "production":
+            raise RuntimeError(
+                f"Order placement blocked in '{TRADING_MODE}' mode. "
+                "Switch to production mode in Settings first."
+            )
+
+        sdk_order_type = (
+            self._groww.ORDER_TYPE_LIMIT
+            if order_type.upper() == "LIMIT"
+            else self._groww.ORDER_TYPE_MARKET
+        )
+        sdk_txn_type = (
+            self._groww.TRANSACTION_TYPE_BUY
+            if transaction_type.upper() == "BUY"
+            else self._groww.TRANSACTION_TYPE_SELL
+        )
+
+        result = self._groww.place_order(
+            validity          = self._groww.VALIDITY_DAY,
+            exchange          = self._groww.EXCHANGE_MCX,
+            order_type        = sdk_order_type,
+            product           = self._groww.PRODUCT_NRML,
+            quantity          = lots,
+            segment           = self._groww.SEGMENT_COMMODITY,
+            trading_symbol    = trading_symbol,
+            transaction_type  = sdk_txn_type,
+            price             = price if order_type.upper() == "LIMIT" else 0.0,
+            order_reference_id = reference_id,
+        )
+        logger.info(
+            f"MCX order placed: {transaction_type} {lots} lots "
+            f"{trading_symbol} [{order_type}] → {result}"
+        )
+        return result
+
+    def cancel_mcx_order(self, groww_order_id: str) -> dict:
+        """Cancel an open MCX order. Production mode only."""
+        from config import TRADING_MODE
+        if TRADING_MODE != "production":
+            raise RuntimeError("Order cancellation only allowed in production mode")
+        result = self._groww.cancel_order(
+            groww_order_id = groww_order_id,
+            segment        = self._groww.SEGMENT_COMMODITY,
+        )
+        logger.info(f"MCX order cancelled: {groww_order_id} → {result}")
+        return result
+
+    def get_mcx_order_status(self, groww_order_id: str) -> dict:
+        """Get status of a specific MCX order."""
+        try:
+            return self._groww.get_order_status(
+                segment        = self._groww.SEGMENT_COMMODITY,
+                groww_order_id = groww_order_id,
+            )
+        except Exception as e:
+            logger.error(f"get_mcx_order_status({groww_order_id}) failed: {e}")
+            return {}
+
+    def get_mcx_order_book(self) -> list[dict]:
+        """Get all today's MCX orders."""
+        try:
+            result = self._groww.get_order_list()
+            if isinstance(result, pd.DataFrame):
+                return result.to_dict("records")
+            if isinstance(result, dict):
+                return result.get("orders", result.get("data", []))
+            return result if isinstance(result, list) else []
+        except Exception as e:
+            logger.error(f"get_mcx_order_book failed: {e}")
+            return []
+
+    def get_margin_available(self) -> dict:
+        """
+        Get available commodity margin from Groww account.
+        Returns dict with available_margin and other fields.
+        """
+        try:
+            return self._groww.get_available_margin_details()
+        except Exception as e:
+            logger.error(f"get_margin_available failed: {e}")
+            return {}
+
+    def get_live_positions(self) -> list[dict]:
+        """Get current open MCX positions with live MTM P&L."""
+        try:
+            result = self._groww.get_positions_for_user(
+                segment = self._groww.SEGMENT_COMMODITY,
+            )
+            if isinstance(result, pd.DataFrame):
+                return result.to_dict("records")
+            if isinstance(result, dict):
+                return result.get("positions", result.get("data", []))
+            return result if isinstance(result, list) else []
+        except Exception as e:
+            logger.error(f"get_live_positions failed: {e}")
+            return []
+
     # ── Health Check ───────────────────────────────────────────────
 
     def ping(self) -> dict:

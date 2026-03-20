@@ -17,7 +17,7 @@ from core.ui_helpers import (
     render_guardrails,
 )
 from core.db import get_connection, init as db_init
-from config import TRADING_MODE, ACTIVE_LLM, MIN_CONFIDENCE_THRESHOLD
+from config import TRADING_MODE, ACTIVE_LLM, MIN_CONFIDENCE_THRESHOLD, LOT_CONFIG
 
 st.set_page_config(
     page_title="Signal Engine — COMMODEX",
@@ -300,8 +300,142 @@ if run_button:
             st.subheader("Risk Parameters")
             render_risk_params(result.risk, result.position_sizing)
 
-        # Follow / Ignore buttons
-        if signal_id and result.final_action != "HOLD":
+        # ── Production: Execute Real Order ─────────────────
+        if (
+            signal_id
+            and result.final_action != "HOLD"
+            and guardrail_check["approved"]
+            and TRADING_MODE == "production"
+        ):
+            st.divider()
+            st.subheader("🔴 Execute Trade — REAL MONEY")
+
+            lots      = result.position_sizing.get("position_lots", 1) if result.position_sizing else 1
+            entry_px  = result.risk.entry_price if result.risk else 0
+            sl_px     = result.risk.stop_loss   if result.risk else 0
+            t1_px     = result.risk.target_1    if result.risk else 0
+            risk_inr  = result.position_sizing.get("actual_risk_inr", 0) if result.position_sizing else 0
+            entry_typ = (result.risk.entry_type or "market").upper() if result.risk else "MARKET"
+
+            # Margin check
+            margin_ok = True
+            try:
+                from core.groww_client import GrowwClient as _GC
+                _gc = _GC(access_token=token)
+                margin_data = _gc.get_margin_available()
+                # Groww returns nested dict — try common key paths
+                avail_margin = (
+                    margin_data.get("available_margin")
+                    or margin_data.get("commodity_available")
+                    or margin_data.get("net", {}).get("available")
+                    or 0
+                )
+                lot_cfg      = LOT_CONFIG.get(commodity, {})
+                margin_pct   = lot_cfg.get("margin_pct", 10)
+                lot_size     = lot_cfg.get("lot_size", 100)
+                # quote_unit is "per_10g" for gold — price is per 10g
+                quote_unit   = lot_cfg.get("quote_unit", "")
+                if quote_unit == "per_10g":
+                    contract_val = entry_px * (lot_size / 10)
+                else:
+                    contract_val = entry_px * lot_size
+                req_per_lot  = contract_val * margin_pct / 100
+                req_total    = req_per_lot * lots
+
+                mc1, mc2, mc3 = st.columns(3)
+                with mc1:
+                    st.metric("Available Margin", f"Rs{avail_margin:,.0f}")
+                with mc2:
+                    st.metric("Required Margin", f"Rs{req_total:,.0f}")
+                with mc3:
+                    if avail_margin >= req_total:
+                        st.success("✓ Sufficient")
+                    else:
+                        st.error(f"✗ Short by Rs{req_total - avail_margin:,.0f}")
+                        margin_ok = False
+            except Exception as _me:
+                st.warning(f"Margin check unavailable: {_me}")
+
+            # Order confirmation
+            st.warning(
+                f"**{result.final_action}** {lots} lot(s) of **{commodity}** at "
+                f"Rs{entry_px:,.2f} ({entry_typ})  |  "
+                f"SL: Rs{sl_px:,.2f}  |  T1: Rs{t1_px:,.2f}  |  "
+                f"Risk: Rs{risk_inr:,.0f}"
+            )
+            exec_confirm = st.checkbox(
+                "I confirm this places a REAL MONEY MCX order",
+                key="exec_confirm",
+            )
+            if exec_confirm and margin_ok:
+                if st.button("🔴 EXECUTE ORDER NOW", type="primary", key="exec_btn"):
+                    try:
+                        from core.groww_client import GrowwClient as _GC2
+                        _gc2 = _GC2(access_token=token)
+
+                        # Strip exchange prefix from contract symbol if present
+                        contract_sym = result.contract
+                        if contract_sym.upper().startswith("MCX_"):
+                            contract_sym = contract_sym[4:]
+
+                        order_res = _gc2.place_mcx_order(
+                            trading_symbol   = contract_sym,
+                            transaction_type = result.final_action,
+                            lots             = lots,
+                            order_type       = entry_typ,
+                            price            = entry_px if entry_typ == "LIMIT" else 0.0,
+                        )
+                        groww_order_id = (
+                            order_res.get("groww_order_id")
+                            or order_res.get("order_id")
+                            or str(order_res)
+                        )
+
+                        # Log to trades_log
+                        _conn = get_connection()
+                        _cur  = _conn.cursor()
+                        _cur.execute("""
+                            INSERT INTO trades_log (
+                                signal_id, commodity, contract, mode, action, lots,
+                                entry_price, entry_time,
+                                stop_loss, target_1, target_2,
+                                order_id, order_status, notes
+                            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        """, (
+                            signal_id,
+                            commodity,
+                            result.contract,
+                            TRADING_MODE,
+                            result.final_action,
+                            lots,
+                            entry_px,
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            sl_px,
+                            t1_px,
+                            result.risk.target_2 if result.risk else None,
+                            groww_order_id,
+                            "OPEN",
+                            "Executed via COMMODEX production mode",
+                        ))
+                        _conn.execute(
+                            "UPDATE signals_log SET followed=1 WHERE id=?",
+                            (signal_id,),
+                        )
+                        _conn.commit()
+                        _conn.close()
+
+                        st.success(
+                            f"✅ Order placed!  "
+                            f"Groww Order ID: **{groww_order_id}**  |  "
+                            f"Trade logged.  Go to Trade Log to manage exits."
+                        )
+                    except Exception as _oe:
+                        st.error(f"Order placement failed: {_oe}")
+                        import traceback
+                        st.code(traceback.format_exc())
+
+        # ── Paper / Demo: Follow / Ignore tracking ─────────
+        elif signal_id and result.final_action != "HOLD" and TRADING_MODE != "production":
             st.divider()
             st.subheader("Did you follow this signal?")
             fc1, fc2, _ = st.columns([1, 1, 3])

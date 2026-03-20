@@ -256,3 +256,46 @@ with ts4:
     )
 with ts5:
     st.metric("Trades", summary.get("trades", 0))
+
+# ── Live Positions (Production Mode) ───────────────────────
+if TRADING_MODE == "production":
+    st.divider()
+    st.subheader("Live Positions")
+
+    @st.cache_data(ttl=30)
+    def fetch_live_positions():
+        try:
+            from generate_token import generate_totp_token, save_token_to_env
+            tok = generate_totp_token()
+            save_token_to_env(tok)
+            os.environ["GROWW_ACCESS_TOKEN"] = tok
+
+            from core.groww_client import GrowwClient
+            gc = GrowwClient(access_token=tok)
+            return gc.get_live_positions(), None
+        except Exception as e:
+            return [], str(e)
+
+    positions, pos_err = fetch_live_positions()
+
+    if pos_err:
+        st.warning(f"Could not fetch positions: {pos_err}")
+    elif not positions:
+        st.info("No open commodity positions.")
+    else:
+        import pandas as pd
+        pos_df = pd.DataFrame(positions)
+        st.dataframe(pos_df, use_container_width=True)
+
+        # MTM summary
+        try:
+            mtm_cols = [c for c in pos_df.columns if "mtm" in c.lower() or "pnl" in c.lower()]
+            if mtm_cols:
+                total_mtm = pos_df[mtm_cols[0]].sum()
+                st.metric(
+                    "Total MTM P&L",
+                    f"Rs{total_mtm:,.0f}",
+                    delta=f"{total_mtm/CAPITAL_INR*100:.2f}%" if CAPITAL_INR else None,
+                )
+        except Exception:
+            pass

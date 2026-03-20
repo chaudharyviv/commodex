@@ -157,6 +157,32 @@ def init():
     conn.commit()
     conn.close()
     logger.info(f"Database initialised at {DB_PATH}")
+    _migrate()
+
+
+def _migrate():
+    """
+    Apply incremental schema migrations.
+    Uses ADD COLUMN in try/except so re-runs are safe (column already exists).
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    # v1.1 — order tracking columns for real-money execution
+    for col_name, col_def in [
+        ("order_id",       "TEXT"),
+        ("order_status",   "TEXT DEFAULT 'MANUAL'"),
+        ("exit_order_id",  "TEXT"),
+    ]:
+        try:
+            cursor.execute(
+                f"ALTER TABLE trades_log ADD COLUMN {col_name} {col_def}"
+            )
+        except Exception:
+            pass   # column already exists
+
+    conn.commit()
+    conn.close()
 
 
 def health_check() -> dict:
