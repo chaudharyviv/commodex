@@ -232,70 +232,85 @@ def render_technicals(tech_data):
             f"PDL: {fmt_price(tech_data.prev_day_low)}"
         )
 
-    # Fibonacci levels
-    if tech_data.fib_382 is not None:
-        st.divider()
+    # ── Fibonacci Retracement ─────────────────────────────
+    if tech_data.fib_382:
         st.markdown("#### Fibonacci Retracement")
-        st.caption(
-            f"Swing {tech_data.fib_trend}: "
-            f"H={fmt_price(tech_data.fib_swing_high)} → "
-            f"L={fmt_price(tech_data.fib_swing_low)}"
-        )
+        trend_desc = (
+            f"Swing down: H=Rs{tech_data.fib_swing_high:,.0f} "
+            f"→ L=Rs{tech_data.fib_swing_low:,.0f}"
+            if tech_data.fib_trend == "down"
+            else
+            f"Swing up: L=Rs{tech_data.fib_swing_low:,.0f} "
+            f"→ H=Rs{tech_data.fib_swing_high:,.0f}"
+        ) if tech_data.fib_swing_high and tech_data.fib_swing_low else ""
+        st.caption(trend_desc)
+
         fc = st.columns(5)
-        with fc[0]:
-            st.metric("23.6%", fmt_price(tech_data.fib_236))
-        with fc[1]:
-            st.metric("38.2%", fmt_price(tech_data.fib_382))
-        with fc[2]:
-            st.metric("50.0%", fmt_price(tech_data.fib_500))
-        with fc[3]:
-            st.metric("61.8%", fmt_price(tech_data.fib_618))
-        with fc[4]:
-            st.metric("78.6%", fmt_price(tech_data.fib_786))
+        for col, (pct, val) in zip(fc, [
+            ("23.6%", tech_data.fib_236),
+            ("38.2%", tech_data.fib_382),
+            ("50.0%", tech_data.fib_500),
+            ("61.8%", tech_data.fib_618),
+            ("78.6%", tech_data.fib_786),
+        ]):
+            with col:
+                st.markdown(f"**{pct}**")
+                st.markdown(
+                    f"**Rs{val:,.0f}**" if val else "N/A"
+                )
+        st.divider()
 
-    st.divider()
-
-    # ── Volume & Open Interest ────────────────────────
+    # ── Volume & OI ───────────────────────────────────────
     st.markdown("#### Volume & Open Interest")
-    vo = st.columns(4)
-    with vo[0]:
-        vol = f"{tech_data.volume_current:,}" if tech_data.volume_current else "N/A"
+    voi = st.columns(4)
+    with voi[0]:
         st.markdown("**Volume**")
+        vol = f"{tech_data.volume_current:,}" if tech_data.volume_current else "N/A"
         st.markdown(f"### {vol}")
-        avg = f"{tech_data.volume_avg_20:,.0f}" if tech_data.volume_avg_20 else "N/A"
-        st.caption(f"Avg20: {avg} [{tech_data.volume_signal or 'N/A'}]")
-    with vo[1]:
+        st.caption(
+            f"Avg20: {tech_data.volume_avg_20:,.0f} "
+            f"[{tech_data.volume_signal or 'N/A'}]"
+            if tech_data.volume_avg_20 else ""
+        )
+    with voi[1]:
         st.markdown("**Vol-Price**")
         vpc = (tech_data.volume_price_confirm or "N/A").replace("_", " ")
         st.markdown(f"**{vpc}**")
-    with vo[2]:
-        if tech_data.oi_current is not None:
-            st.markdown("**Open Interest**")
+    with voi[2]:
+        st.markdown("**Open Interest**")
+        if tech_data.oi_current and tech_data.oi_current > 0:
             st.markdown(f"### {tech_data.oi_current:,}")
-            st.caption(f"Change: {tech_data.oi_change_pct:+.1f}%")
+            if tech_data.oi_change_pct is not None:
+                direction = "▲" if tech_data.oi_change_pct > 0 else "▼"
+                st.caption(
+                    f"{direction} {abs(tech_data.oi_change_pct):.1f}% "
+                    f"vs prev day"
+                )
         else:
-            st.markdown("**Open Interest**")
             st.markdown("### N/A")
-            st.caption("OI data not available")
-    with vo[3]:
-        if tech_data.oi_interpretation:
-            st.markdown("**OI Signal**")
-            oi_sig = tech_data.oi_interpretation.replace("_", " ")
-            # Colour-code OI interpretation
-            if tech_data.oi_interpretation == "fresh_longs":
-                st.success(f"🟢 {oi_sig}")
-            elif tech_data.oi_interpretation == "fresh_shorts":
-                st.error(f"🔴 {oi_sig}")
-            elif tech_data.oi_interpretation == "short_covering":
-                st.warning(f"🟡 {oi_sig}")
-            elif tech_data.oi_interpretation == "long_unwinding":
-                st.warning(f"🟠 {oi_sig}")
-            else:
-                st.info(f"⚪ {oi_sig}")
+            st.caption(
+                "OI available during market hours only" 
+                if tech_data.oi_current is None 
+                else "OI data not in quote"
+            )
+    with voi[3]:
+        st.markdown("**OI Signal**")
+        if tech_data.oi_interpretation and tech_data.oi_interpretation != "neutral":
+            oi_colors = {
+                "fresh_longs":    "🟢",
+                "short_covering": "🟡",
+                "fresh_shorts":   "🔴",
+                "long_unwinding": "🟠",
+            }
+            icon = oi_colors.get(tech_data.oi_interpretation, "⚪")
+            label = tech_data.oi_interpretation.replace("_", " ").title()
+            st.markdown(f"**{icon} {label}**")
+        elif tech_data.oi_interpretation == "neutral":
+            st.markdown("**⚪ Neutral**")
         else:
-            st.markdown("**OI Signal**")
-            st.info("⚪ N/A")
-
+            st.markdown("**N/A**")
+            st.caption("Market closed")
+    st.divider()
 
 # ─────────────────────────────────────────────────────────────────
 # RISK PARAMETERS TABLE
@@ -369,14 +384,14 @@ def render_sidebar():
         render_market_status()
         st.divider()
         st.caption("Navigate:")
-        st.markdown("🏠 [Home](/)  ")
-        st.markdown("📊 [Dashboard](/Dashboard)")
-        st.markdown("⚡ [Signal Engine](/Signal_Engine)")
-        st.markdown("📋 [Trade Log](/Trade_Log)")
-        st.markdown("🔬 [Backtest](/Backtest)")
-        st.markdown("⚙ [Settings](/Settings)")
+        selection = st.radio(
+            "Navigation",
+            options=["Home", "Dashboard", "Signal Engine", "Trade Log", "Settings"],
+            label_visibility="collapsed"
+        )
         st.divider()
         st.caption(
-            f"v2.0 | Phase 5 | "
+            f"v2.0 | Single Page | "
             f"{datetime.now(IST).strftime('%d %b %Y')}"
         )
+        return selection

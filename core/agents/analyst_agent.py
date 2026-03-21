@@ -1,10 +1,12 @@
 """
-COMMODEX — Agent 1: Market Analyst
+COMMODEX — Agent 1: Market Analyst (v2.0)
 Reads the full DataBundle and produces a neutral MarketAnalysis.
 No buy/sell decisions — pure market description.
 
 Includes programmatic sanity checker between Agent 1 and Agent 2
 as recommended in the design review.
+
+v2.0: Added sanity checks for ADX, OI, VWAP, Supertrend
 """
 
 import logging
@@ -77,9 +79,11 @@ Return a JSON object with these exact fields:
 
 
 # ─────────────────────────────────────────────────────────────────
-# SANITY CHECKER
+# SANITY CHECKER v2.0
 # Programmatic contradiction check between Agent 1 and Agent 2
 # Catches hallucinated market regimes before they propagate
+#
+# v2.0: Added checks for ADX, OI, VWAP, Supertrend
 # ─────────────────────────────────────────────────────────────────
 
 class SanityChecker:
@@ -103,7 +107,7 @@ class SanityChecker:
             "confidence_cap": int or None
         }
         """
-        warnings     = []
+        warnings       = []
         confidence_cap = None
         tech = bundle.technicals
 
@@ -178,6 +182,144 @@ class SanityChecker:
             )
             if confidence_cap is None or confidence_cap > 60:
                 confidence_cap = 60
+
+        # ── Check 6 (NEW v2.0) ────────────────────────────
+        # ADX contradicts regime — regime=trending but ADX says ranging
+        if (
+            tech.adx_14 is not None
+            and analysis.market_regime in ("trending_up", "trending_down")
+            and tech.adx_signal == "ranging"
+        ):
+            warnings.append(
+                f"CONTRADICTION: regime={analysis.market_regime} but "
+                f"ADX={tech.adx_14} [{tech.adx_signal}]. "
+                f"ADX below 20 indicates no meaningful trend. "
+                f"Trend-following signals will likely fail."
+            )
+            if confidence_cap is None or confidence_cap > 60:
+                confidence_cap = 60
+
+        # ── Check 7 (NEW v2.0) ────────────────────────────
+        # ADX contradicts regime — regime=ranging but ADX says strong trend
+        if (
+            tech.adx_14 is not None
+            and analysis.market_regime == "ranging"
+            and tech.adx_signal in ("trending", "strong_trend")
+        ):
+            warnings.append(
+                f"CONTRADICTION: regime=ranging but "
+                f"ADX={tech.adx_14} [{tech.adx_signal}]. "
+                f"ADX above 25 indicates directional trend. "
+                f"Mean-reversion signals will likely fail."
+            )
+            if confidence_cap is None or confidence_cap > 65:
+                confidence_cap = 65
+
+        # ── Check 8 (NEW v2.0) ────────────────────────────
+        # OI shows weak conviction — short covering on bullish,
+        # or long unwinding on bearish. Signal is less reliable.
+        if tech.oi_interpretation:
+            if (
+                analysis.overall_sentiment == "bullish"
+                and tech.oi_interpretation == "short_covering"
+            ):
+                warnings.append(
+                    f"WEAK CONVICTION: Bullish sentiment but OI shows "
+                    f"short_covering (OI falling with price up). "
+                    f"This is weak bullish — rally may exhaust quickly."
+                )
+                if confidence_cap is None or confidence_cap > 70:
+                    confidence_cap = 70
+
+            if (
+                analysis.overall_sentiment == "bearish"
+                and tech.oi_interpretation == "long_unwinding"
+            ):
+                warnings.append(
+                    f"WEAK CONVICTION: Bearish sentiment but OI shows "
+                    f"long_unwinding (OI falling with price down). "
+                    f"This is weak bearish — dip may reverse."
+                )
+                if confidence_cap is None or confidence_cap > 70:
+                    confidence_cap = 70
+
+        # ── Check 9 (NEW v2.0) ────────────────────────────
+        # Supertrend contradicts signal direction
+        if (
+            tech.supertrend_dir
+            and analysis.overall_sentiment == "bullish"
+            and tech.supertrend_dir == "bearish"
+        ):
+            warnings.append(
+                f"SUPERTREND CONFLICT: Bullish sentiment but "
+                f"Supertrend is bearish at Rs{tech.supertrend:,.0f}. "
+                f"Price is below the Supertrend line."
+            )
+            if confidence_cap is None or confidence_cap > 70:
+                confidence_cap = 70
+
+        if (
+            tech.supertrend_dir
+            and analysis.overall_sentiment == "bearish"
+            and tech.supertrend_dir == "bullish"
+        ):
+            warnings.append(
+                f"SUPERTREND CONFLICT: Bearish sentiment but "
+                f"Supertrend is bullish at Rs{tech.supertrend:,.0f}. "
+                f"Price is above the Supertrend line."
+            )
+            if confidence_cap is None or confidence_cap > 70:
+                confidence_cap = 70
+
+        # ── Check 10 (NEW v2.0) ───────────────────────────
+        # RSI divergence detected — flag prominently
+        if tech.rsi_divergence and tech.rsi_divergence != "none":
+            div_type = tech.rsi_divergence
+            warnings.append(
+                f"RSI DIVERGENCE: {div_type} divergence detected. "
+                f"Price and RSI are moving in opposite directions. "
+                f"{'Potential reversal to upside.' if div_type == 'bullish' else 'Potential reversal to downside.'}"
+            )
+            # Divergence doesn't cap — it's informational for Agent 2
+
+        # ── Check 11 (NEW v2.0) ───────────────────────────
+        # BB squeeze — breakout imminent, warn Agent 2
+        if tech.bb_squeeze:
+            warnings.append(
+                f"BB SQUEEZE ACTIVE: Bollinger Band width at period low. "
+                f"Breakout imminent — direction unknown. "
+                f"Wait for confirmation candle before committing."
+            )
+            # Squeeze doesn't cap — it's directionally neutral
+
+        # ── Check 12 (NEW v2.0) ───────────────────────────
+        # EMA 200 conflict — positional signal against long-term trend
+        if (
+            tech.ema_200_trend
+            and analysis.overall_sentiment == "bullish"
+            and "bearish" in tech.ema_200_trend
+        ):
+            warnings.append(
+                f"EMA200 CONFLICT: Bullish sentiment but price is below "
+                f"EMA(200) at Rs{tech.ema_200:,.0f}. "
+                f"Long-term bias is bearish — positional longs carry extra risk."
+            )
+            # Soft cap — informational for positional trades
+            if confidence_cap is None or confidence_cap > 75:
+                confidence_cap = 75
+
+        if (
+            tech.ema_200_trend
+            and analysis.overall_sentiment == "bearish"
+            and "bullish" in tech.ema_200_trend
+        ):
+            warnings.append(
+                f"EMA200 CONFLICT: Bearish sentiment but price is above "
+                f"EMA(200) at Rs{tech.ema_200:,.0f}. "
+                f"Long-term bias is bullish — positional shorts carry extra risk."
+            )
+            if confidence_cap is None or confidence_cap > 75:
+                confidence_cap = 75
 
         passed = len(warnings) == 0
 

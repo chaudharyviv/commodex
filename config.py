@@ -50,9 +50,8 @@ ACTIVE_LLM = LLM_CONFIG[TRADING_MODE]
 # ─────────────────────────────────────────────────────────────────
 # GROWW API
 # ─────────────────────────────────────────────────────────────────
-GROWW_API_KEY    = os.getenv("GROWW_API_KEY")
-GROWW_API_SECRET = os.getenv("GROWW_API_SECRET")
-GROWW_BASE_URL   = "https://api.groww.in/v1"
+GROWW_API_KEY     = os.getenv("GROWW_API_KEY")
+GROWW_TOTP_SECRET = os.getenv("GROWW_TOTP_SECRET")
 
 # ─────────────────────────────────────────────────────────────────
 # MCX LOT CONFIGURATION

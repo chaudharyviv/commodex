@@ -115,6 +115,8 @@ class SignalOrchestrator:
         self._assembler = DataBundleAssembler(
             self._groww, self._tech, self._news
         )
+        from core.notifier import TelegramNotifier
+        self._notifier  = TelegramNotifier()
         logger.info(
             f"SignalOrchestrator ready — "
             f"mode={TRADING_MODE} provider={ACTIVE_LLM['provider']}"
@@ -230,4 +232,18 @@ class SignalOrchestrator:
             f"confidence={result.final_confidence}% | "
             f"approved={result.approved}"
         )
+
+        # ── Telegram notification ──────────────────────────
+        # Only notify for actionable BUY/SELL signals
+        # HOLD signals are not sent to avoid notification fatigue
+        if result.final_action in ("BUY", "SELL") and result.approved:
+            try:
+                sent = self._notifier.send_signal(result)
+                if sent:
+                    logger.info(f"Telegram notification sent for {symbol} {result.final_action}")
+                else:
+                    logger.info("Telegram not configured or signal suppressed")
+            except Exception as e:
+                logger.warning(f"Telegram notification failed (non-critical): {e}")
+
         return result

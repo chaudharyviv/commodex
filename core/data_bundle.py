@@ -212,6 +212,20 @@ class DataBundleAssembler:
         except Exception as e:
             logger.warning(f"LTP fetch failed: {e}")
 
+        # ── 1b. Open Interest ──────────────────────────────
+        # Injected into technicals after they are computed
+        # so we store temporarily here
+        _oi_data = {}
+        try:
+            _oi_data = self._groww.get_oi(trading_symbol)
+            if _oi_data:
+                logger.info(
+                    f"OI fetched: {_oi_data.get('oi_interpretation')} | "
+                    f"change={_oi_data.get('oi_change_pct'):+.1f}%"
+                )
+        except Exception as e:
+            logger.warning(f"OI fetch failed: {e}")
+
         # ── 2. Historical + Technicals ─────────────────────
         try:
             candles = self._groww.get_historical(
@@ -224,6 +238,18 @@ class DataBundleAssembler:
                     candles, symbol, timeframe
                 )
                 bundle.technicals_ok = True
+
+                # Inject OI data into technicals
+                # (OI comes from quote, not candles)
+                if _oi_data and bundle.technicals:
+                    bundle.technicals.oi_current        = _oi_data.get("oi_current")
+                    bundle.technicals.oi_prev_day       = _oi_data.get("oi_prev_day")
+                    bundle.technicals.oi_change_pct     = _oi_data.get("oi_change_pct")
+                    bundle.technicals.oi_interpretation = _oi_data.get("oi_interpretation")
+                    logger.info(
+                        f"OI injected into technicals: "
+                        f"{_oi_data.get('oi_interpretation')}"
+                    )
         except Exception as e:
             logger.warning(f"Technicals failed: {e}")
 

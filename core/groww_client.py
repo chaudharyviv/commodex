@@ -16,7 +16,7 @@ from growwapi import GrowwAPI
 
 from config import (
     GROWW_API_KEY,
-    GROWW_API_SECRET,
+    GROWW_TOTP_SECRET,
     LOT_CONFIG,
     ACTIVE_COMMODITIES,
 )
@@ -195,6 +195,91 @@ class GrowwClient:
         except Exception as e:
             logger.error(f"get_quote({trading_symbol}) failed: {e}")
             raise
+
+    def get_quote(self, trading_symbol: str, exchange: str = "MCX") -> dict:
+        """
+        Get full market quote for a single MCX instrument.
+        Returns OHLC, depth, volume, OI, circuit limits.
+        """
+        try:
+            result = self._groww.get_quote(
+                exchange=exchange,
+                segment=self._groww.SEGMENT_COMMODITY,
+                trading_symbol=trading_symbol,
+            )
+            return result
+        except Exception as e:
+            logger.error(f"get_quote({trading_symbol}) failed: {e}")
+            raise
+
+    def get_oi(self, trading_symbol: str) -> dict:
+        """
+        Fetch Open Interest data for an MCX futures contract.
+        Uses get_quote() which returns open_interest, oi_day_change,
+        previous_open_interest from the Groww API.
+
+        OI Interpretation Matrix:
+          Price UP   + OI UP   = fresh_longs    (bullish, strong)
+          Price DOWN + OI UP   = fresh_shorts   (bearish, strong)
+          Price UP   + OI DOWN = short_covering (bullish, weak)
+          Price DOWN + OI DOWN = long_unwinding (bearish, weak)
+          OI change < ±2%     = neutral
+
+        Returns dict with oi values and interpretation,
+        or empty dict if fetch fails.
+        """
+        try:
+            quote = self.get_quote(trading_symbol)
+
+            if not quote:
+                return {}
+
+            oi_current  = int(quote.get("open_interest",          0) or 0)
+            oi_prev     = int(quote.get("previous_open_interest",  0) or 0)
+            oi_change   = float(quote.get("oi_day_change",         0) or 0)
+            ltp         = float(quote.get("last_price",            0) or 0)
+
+            # OI change as percentage
+            oi_change_pct = round(
+                (oi_change / oi_prev * 100) if oi_prev > 0 else 0, 2
+            )
+
+            # Price direction — compare LTP to previous close
+            ohlc      = quote.get("ohlc", {})
+            prev_close = float(ohlc.get("close", ltp) or ltp) if isinstance(ohlc, dict) else ltp
+            price_up   = ltp >= prev_close
+
+            # Interpretation matrix
+            if abs(oi_change_pct) < 2.0:
+                interpretation = "neutral"
+            elif oi_change_pct > 0 and price_up:
+                interpretation = "fresh_longs"       # strong bullish
+            elif oi_change_pct > 0 and not price_up:
+                interpretation = "fresh_shorts"      # strong bearish
+            elif oi_change_pct < 0 and price_up:
+                interpretation = "short_covering"    # weak bullish
+            else:
+                interpretation = "long_unwinding"    # weak bearish
+
+            result = {
+                "oi_current":        oi_current,
+                "oi_prev_day":       oi_prev,
+                "oi_change":         int(oi_change),
+                "oi_change_pct":     oi_change_pct,
+                "oi_interpretation": interpretation,
+                "price_direction":   "up" if price_up else "down",
+            }
+
+            logger.info(
+                f"OI: {trading_symbol} | "
+                f"OI={oi_current:,} ({oi_change_pct:+.1f}%) | "
+                f"{interpretation}"
+            )
+            return result
+
+        except Exception as e:
+            logger.warning(f"get_oi({trading_symbol}) failed: {e}")
+            return {}
 
     # ── Historical Data ────────────────────────────────────────────
 
