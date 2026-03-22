@@ -813,6 +813,7 @@ def render_trade_log():
         CAPITAL_INR,
         get_active_instrument_symbols,
         LOT_CONFIG,
+        strip_exchange_prefix,
     )
     
     
@@ -1071,28 +1072,7 @@ def render_trade_log():
             sl_px    = float(sel_row["stop_loss"]) if sel_row["stop_loss"] else 0.0
             t1_px    = float(sel_row["target_1"])  if sel_row["target_1"]  else 0.0
     
-            ec1, ec2 = st.columns(2)
-            with ec1:
-                exit_price = st.number_input(
-                    "Exit Price (Rs)",
-                    min_value   = 0.0,
-                    value       = t1_px if t1_px else entry_px,
-                    step        = 0.5,
-                    format      = "%.2f",
-                    key         = "exit_px",
-                )
-            with ec2:
-                exit_reason = st.selectbox(
-                    "Exit Reason",
-                    ["T1_HIT", "T2_HIT", "SL_HIT", "MANUAL", "SESSION_END", "OTHER"],
-                    key = "exit_reason",
-                )
-    
-            exit_notes = st.text_input("Notes (optional)", key="exit_notes")
-    
-            # P&L preview
             action     = sel_row["action"]
-            lot_cfg     = LOT_CONFIG.get(sel_row["commodity"], {})
             pl_per_tick = lot_cfg.get("pl_per_tick", 10)
             tick_sz     = lot_cfg.get("tick_size", 1)
 
@@ -1124,7 +1104,7 @@ def render_trade_log():
                     elif st.button("🔻 Place Broker Exit Order", type="primary", key=f"place_exit_{selected_id}"):
                         try:
                             gc = build_groww_client()
-                            contract_sym = str(sel_row["contract"]).removeprefix("MCX_")
+                            contract_sym = strip_exchange_prefix(str(sel_row["contract"]))
                             exit_res = gc.place_mcx_exit_order(
                                 trading_symbol = contract_sym,
                                 entry_action   = action,
