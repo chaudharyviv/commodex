@@ -17,10 +17,11 @@ from core.technical_engine import TechnicalEngine, TechnicalData
 from core.news_client import NewsClient
 from core.inr_usd import get_inr_usd_rate
 from config import (
-    ACTIVE_COMMODITIES,
     CONFIDENCE_CAP_NO_NEWS,
     CONFIDENCE_CAP_INR_VOLATILE,
     LOT_CONFIG,
+    build_exchange_trading_symbol,
+    get_instrument_exchange,
 )
 
 logger = logging.getLogger(__name__)
@@ -188,9 +189,12 @@ class DataBundleAssembler:
         contract_info = self._groww.find_active_contract(symbol)
         if not contract_info:
             logger.error(f"No active contract for {symbol}")
-            raise ValueError(f"No active MCX contract found for {symbol}")
+            raise ValueError(
+                f"No active {get_instrument_exchange(symbol)} contract found for {symbol}"
+            )
 
         trading_symbol = contract_info["trading_symbol"]
+        exchange = contract_info.get("exchange") or get_instrument_exchange(symbol)
         bundle = DataBundle(
             symbol         = symbol,
             contract       = trading_symbol,
@@ -201,10 +205,11 @@ class DataBundleAssembler:
 
         # ── 1. Live Price ──────────────────────────────────
         try:
-            ltp_data = self._groww.get_ltp(
-                [f"MCX_{trading_symbol}"]
+            ltp_key = build_exchange_trading_symbol(
+                trading_symbol=trading_symbol,
+                exchange=exchange,
             )
-            ltp_key = f"MCX_{trading_symbol}"
+            ltp_data = self._groww.get_ltp([ltp_key])
             if ltp_data and ltp_key in ltp_data:
                 bundle.ltp           = float(ltp_data[ltp_key])
                 bundle.ltp_available = True
@@ -217,7 +222,7 @@ class DataBundleAssembler:
         # so we store temporarily here
         _oi_data = {}
         try:
-            _oi_data = self._groww.get_oi(trading_symbol)
+            _oi_data = self._groww.get_oi(trading_symbol, exchange=exchange)
             if _oi_data:
                 logger.info(
                     f"OI fetched: {_oi_data.get('oi_interpretation')} | "
@@ -230,6 +235,7 @@ class DataBundleAssembler:
         try:
             candles = self._groww.get_historical(
                 trading_symbol=trading_symbol,
+                exchange=exchange,
                 interval=timeframe,
                 days=days,
             )

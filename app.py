@@ -32,7 +32,14 @@ def render_dashboard():
     from core.ui_helpers import render_sidebar, render_signal_badge
     from core.db import get_connection, init as db_init
     from core.inr_usd import get_inr_usd_rate
-    from config import TRADING_MODE, CAPITAL_INR
+    from config import (
+        TRADING_MODE,
+        CAPITAL_INR,
+        ACTIVE_LOT_CONFIG,
+        get_active_instrument_symbols,
+        get_instrument_label,
+        build_exchange_trading_symbol,
+    )
     
     
     
@@ -40,7 +47,7 @@ def render_dashboard():
     
     
     st.title("📊 Dashboard")
-    st.caption("Live MCX prices and latest signals")
+    st.caption("Live Indian commodity prices and latest signals")
     
     # ── Refresh button ─────────────────────────────────────────
     if st.button("🔄 Refresh Prices", type="secondary"):
@@ -48,7 +55,7 @@ def render_dashboard():
         st.rerun()
     
     # ── Live Prices ────────────────────────────────────────────
-    st.subheader("Live MCX Prices")
+    st.subheader("Live Commodity Prices")
     
     @st.cache_data(ttl=30)   # refresh every 30 seconds
     def fetch_live_prices():
@@ -61,36 +68,35 @@ def render_dashboard():
             from core.groww_client import GrowwClient
             client = GrowwClient(access_token=token)
     
-            gold  = client.find_active_contract("GOLDM")
-            crude = client.find_active_contract("CRUDEOILM")
-    
-            prices = {}
+            contracts = {}
+            exchange_symbols = []
+            for symbol in get_active_instrument_symbols():
+                contract = client.find_active_contract(symbol)
+                if contract:
+                    contracts[symbol] = contract
+                    exchange_symbols.append(
+                        build_exchange_trading_symbol(
+                            trading_symbol=contract["trading_symbol"],
+                            exchange=contract.get("exchange"),
+                        )
+                    )
+
+            prices = client.get_ltp(exchange_symbols) if exchange_symbols else {}
             quotes = {}
-    
-            if gold and crude:
-                symbols = [
-                    f"MCX_{gold['trading_symbol']}",
-                    f"MCX_{crude['trading_symbol']}",
-                ]
-                ltp = client.get_ltp(symbols)
-                prices = ltp
-    
-                # Full quote for day change
+
+            for symbol, contract in contracts.items():
                 try:
-                    gq = client.get_quote(gold["trading_symbol"])
-                    cq = client.get_quote(crude["trading_symbol"])
-                    quotes = {
-                        "GOLDM":     gq,
-                        "CRUDEOILM": cq,
-                    }
+                    quotes[symbol] = client.get_quote(
+                        contract["trading_symbol"],
+                        exchange=contract.get("exchange", "MCX"),
+                    )
                 except Exception:
-                    pass
-    
+                    continue
+
             return {
-                "gold_symbol":  gold["trading_symbol"] if gold else None,
-                "crude_symbol": crude["trading_symbol"] if crude else None,
-                "prices":       prices,
-                "quotes":       quotes,
+                "contracts": contracts,
+                "prices":    prices,
+                "quotes":    quotes,
             }
         except Exception as e:
             return {"error": str(e)}
@@ -101,49 +107,38 @@ def render_dashboard():
     if "error" in price_data:
         st.error(f"Price fetch failed: {price_data['error']}")
     else:
-        col1, col2 = st.columns(2)
-    
-        # Gold
-        with col1:
-            st.markdown("### ◈ Gold Mini (GOLDM)")
-            gold_sym = price_data.get("gold_symbol")
-            if gold_sym:
-                key = f"MCX_{gold_sym}"
-                ltp = price_data["prices"].get(key, 0)
-                quote = price_data["quotes"].get("GOLDM", {})
-                day_change = quote.get("day_change_perc", 0) if quote else 0
-    
-                st.metric(
-                    label    = "LTP (per 10g)",
-                    value    = f"Rs{ltp:,.2f}",
-                    delta    = f"{day_change:+.2f}%" if day_change else None,
-                )
-                if quote:
-                    qc1, qc2 = st.columns(2)
-                    with qc1:
-                        st.caption(f"Open: Rs{quote.get('ohlc', {}).get('open', 'N/A') if isinstance(quote.get('ohlc'), dict) else 'N/A'}")
-                    with qc2:
-                        st.caption(f"Volume: {quote.get('volume', 'N/A'):,}" if quote.get("volume") else "Volume: N/A")
-            else:
-                st.warning("Gold contract not found")
-    
-        # Crude
-        with col2:
-            st.markdown("### ⬡ Crude Oil Mini (CRUDEOILM)")
-            crude_sym = price_data.get("crude_symbol")
-            if crude_sym:
-                key = f"MCX_{crude_sym}"
-                ltp = price_data["prices"].get(key, 0)
-                quote = price_data["quotes"].get("CRUDEOILM", {})
-                day_change = quote.get("day_change_perc", 0) if quote else 0
-    
-                st.metric(
-                    label = "LTP (per barrel)",
-                    value = f"Rs{ltp:,.2f}",
-                    delta = f"{day_change:+.2f}%" if day_change else None,
-                )
-            else:
-                st.warning("Crude contract not found")
+        active_symbols = get_active_instrument_symbols()
+        columns = st.columns(min(3, max(1, len(active_symbols))))
+
+        for idx, symbol in enumerate(active_symbols):
+            cfg = ACTIVE_LOT_CONFIG.get(symbol, {})
+            contract = price_data["contracts"].get(symbol)
+            quote = price_data["quotes"].get(symbol, {})
+            with columns[idx % len(columns)]:
+                st.markdown(f"### {get_instrument_label(symbol, include_exchange=False)}")
+                if contract:
+                    key = build_exchange_trading_symbol(
+                        trading_symbol=contract["trading_symbol"],
+                        exchange=contract.get("exchange"),
+                    )
+                    ltp = price_data["prices"].get(key, 0)
+                    day_change = quote.get("day_change_perc", 0) if quote else 0
+                    st.metric(
+                        label=f"LTP ({cfg.get('quote_unit', 'price').replace('_', ' ')})",
+                        value=f"Rs{ltp:,.2f}",
+                        delta=f"{day_change:+.2f}%" if day_change else None,
+                    )
+                    if quote:
+                        ohlc = quote.get("ohlc", {}) if isinstance(quote.get("ohlc"), dict) else {}
+                        st.caption(f"Contract: {contract['trading_symbol']}")
+                        st.caption(f"Open: Rs{ohlc.get('open', 'N/A')}")
+                        st.caption(
+                            f"Volume: {quote.get('volume', 'N/A'):,}"
+                            if quote.get("volume")
+                            else "Volume: N/A"
+                        )
+                else:
+                    st.warning(f"{symbol} contract not found")
     
     # ── INR/USD ────────────────────────────────────────────────
     st.divider()
@@ -337,7 +332,17 @@ def render_signal_engine():
         render_guardrails,
     )
     from core.db import get_connection, init as db_init
-    from config import TRADING_MODE, ACTIVE_LLM, MIN_CONFIDENCE_THRESHOLD, LOT_CONFIG
+    from config import (
+        TRADING_MODE,
+        ACTIVE_LLM,
+        MIN_CONFIDENCE_THRESHOLD,
+        LOT_CONFIG,
+        ACTIVE_LOT_CONFIG,
+        get_active_instrument_symbols,
+        get_instrument_label,
+        get_instrument_exchange,
+        strip_exchange_prefix,
+    )
     
     
     
@@ -346,7 +351,7 @@ def render_signal_engine():
     
     st.title("⚡ Signal Engine")
     st.caption(
-        f"AI-powered MCX commodity signal generation  |  "
+        f"AI-powered Indian commodity signal generation  |  "
         f"Provider: {ACTIVE_LLM['provider'].upper()}  |  "
         f"Model: {ACTIVE_LLM['model']}"
     )
@@ -355,15 +360,13 @@ def render_signal_engine():
     st.subheader("Analysis Parameters")
     
     ctrl1, ctrl2, ctrl3 = st.columns([2, 2, 1])
+    commodity_options = get_active_instrument_symbols()
     
     with ctrl1:
         commodity = st.selectbox(
             "Commodity",
-            options=["GOLDM", "CRUDEOILM"],
-            format_func=lambda x: {
-                "GOLDM":     "◈ Gold Mini (GOLDM)",
-                "CRUDEOILM": "⬡ Crude Oil Mini (CRUDEOILM)",
-            }.get(x, x)
+            options=commodity_options,
+            format_func=get_instrument_label,
         )
     
     with ctrl2:
@@ -690,15 +693,13 @@ def render_signal_engine():
                             from core.groww_client import GrowwClient as _GC2
                             _gc2 = _GC2(access_token=token)
     
-                            # Strip exchange prefix from contract symbol if present
-                            contract_sym = result.contract
-                            if contract_sym.upper().startswith("MCX_"):
-                                contract_sym = contract_sym[4:]
-    
-                            order_res = _gc2.place_mcx_order(
+                            contract_sym = strip_exchange_prefix(result.contract)
+
+                            order_res = _gc2.place_commodity_order(
                                 trading_symbol   = contract_sym,
                                 transaction_type = result.final_action,
                                 lots             = lots,
+                                exchange         = get_instrument_exchange(commodity),
                                 order_type       = entry_typ,
                                 price            = entry_px if entry_typ == "LIMIT" else 0.0,
                             )
@@ -797,7 +798,12 @@ def render_trade_log():
     
     from core.ui_helpers import render_sidebar
     from core.db import get_connection, init as db_init
-    from config import TRADING_MODE, CAPITAL_INR
+    from config import (
+        TRADING_MODE,
+        CAPITAL_INR,
+        get_active_instrument_symbols,
+        LOT_CONFIG,
+    )
     
     
     
@@ -808,10 +814,12 @@ def render_trade_log():
     st.caption("Signal history, paper trades, and performance tracking")
     
     # ── Filters ────────────────────────────────────────────────
+    commodity_filter_options = ["All", *get_active_instrument_symbols()]
     fc1, fc2, fc3 = st.columns(3)
     with fc1:
         filter_commodity = st.selectbox(
-            "Commodity", ["All", "GOLDM", "CRUDEOILM"]
+            "Commodity",
+            commodity_filter_options,
         )
     with fc2:
         filter_action = st.selectbox(
@@ -1045,10 +1053,7 @@ def render_trade_log():
     
             # P&L preview
             action     = sel_row["action"]
-            tick_size  = 1.0   # Rs1 per tick for both GOLDM & CRUDEOILM
-    
-            from config import LOT_CONFIG as _LC
-            lot_cfg     = _LC.get(sel_row["commodity"], {})
+            lot_cfg     = LOT_CONFIG.get(sel_row["commodity"], {})
             pl_per_tick = lot_cfg.get("pl_per_tick", 10)
             tick_sz     = lot_cfg.get("tick_size", 1)
     

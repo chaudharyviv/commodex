@@ -15,10 +15,9 @@ from typing import Optional
 from growwapi import GrowwAPI
 
 from config import (
-    GROWW_API_KEY,
     GROWW_TOTP_SECRET,
-    LOT_CONFIG,
-    ACTIVE_COMMODITIES,
+    EXCHANGE_CONFIG,
+    get_instrument_exchange,
 )
 
 logger = logging.getLogger(__name__)
@@ -61,7 +60,7 @@ def generate_access_token(
 class GrowwClient:
     """
     COMMODEX wrapper around the official growwapi SDK.
-    Focused on MCX commodity operations needed by the signal pipeline.
+    Focused on Indian commodity operations needed by the signal pipeline.
     """
 
     def __init__(self, access_token: str = None):
@@ -92,34 +91,41 @@ class GrowwClient:
         logger.info(f"Loaded {len(self._instruments_df)} instruments")
         return self._instruments_df
 
-    def get_mcx_futures(self) -> pd.DataFrame:
-        """Return only MCX futures contracts (COMMODITY segment, FUT type)."""
+    def get_futures_for_exchange(self, exchange: str) -> pd.DataFrame:
+        """Return futures contracts for a configured commodity exchange."""
         df = self.get_instruments_df()
+        venue = (exchange or "MCX").upper()
+        segment = EXCHANGE_CONFIG.get(venue, {}).get("segment", "COMMODITY")
         return df[
-            (df["exchange"] == "MCX") &
-            (df["segment"] == "COMMODITY") &
+            (df["exchange"] == venue) &
+            (df["segment"] == segment) &
             (df["instrument_type"] == "FUT")
         ].copy()
 
+    def get_mcx_futures(self) -> pd.DataFrame:
+        """Backward-compatible helper for MCX futures contracts."""
+        return self.get_futures_for_exchange("MCX")
+
     def find_active_contract(self, base_symbol: str) -> Optional[dict]:
         """
-        Find the nearest non-expired MCX futures contract
-        for a base symbol e.g. GOLDM, CRUDEOILM.
+        Find the nearest non-expired commodity futures contract
+        for a configured base symbol e.g. GOLDM, CRUDEOILM, SILVERM.
         Returns dict of instrument details or None.
         """
         try:
-            mcx_futures = self.get_mcx_futures()
+            exchange = get_instrument_exchange(base_symbol)
+            exchange_futures = self.get_futures_for_exchange(exchange)
             today = pd.Timestamp.today().normalize()
 
             # Filter by underlying symbol
-            candidates = mcx_futures[
-                mcx_futures["underlying_symbol"].str.upper() == base_symbol.upper()
+            candidates = exchange_futures[
+                exchange_futures["underlying_symbol"].fillna("").str.upper() == base_symbol.upper()
             ].copy()
 
             if candidates.empty:
                 # Try trading_symbol contains base_symbol
-                candidates = mcx_futures[
-                    mcx_futures["trading_symbol"].str.upper().str.startswith(
+                candidates = exchange_futures[
+                    exchange_futures["trading_symbol"].fillna("").str.upper().str.startswith(
                         base_symbol.upper()
                     )
                 ].copy()
@@ -144,7 +150,8 @@ class GrowwClient:
             logger.info(
                 f"Active contract for {base_symbol}: "
                 f"{contract.get('trading_symbol')} "
-                f"expiry {contract.get('expiry_date')}"
+                f"expiry {contract.get('expiry_date')} "
+                f"on {exchange}"
             )
             return contract
 
@@ -182,7 +189,7 @@ class GrowwClient:
 
     def get_quote(self, trading_symbol: str, exchange: str = "MCX") -> dict:
         """
-        Get full market quote for a single MCX instrument.
+        Get full market quote for a commodity instrument.
         Returns OHLC, depth, volume, OI, circuit limits.
         """
         try:
@@ -196,25 +203,9 @@ class GrowwClient:
             logger.error(f"get_quote({trading_symbol}) failed: {e}")
             raise
 
-    def get_quote(self, trading_symbol: str, exchange: str = "MCX") -> dict:
+    def get_oi(self, trading_symbol: str, exchange: str = "MCX") -> dict:
         """
-        Get full market quote for a single MCX instrument.
-        Returns OHLC, depth, volume, OI, circuit limits.
-        """
-        try:
-            result = self._groww.get_quote(
-                exchange=exchange,
-                segment=self._groww.SEGMENT_COMMODITY,
-                trading_symbol=trading_symbol,
-            )
-            return result
-        except Exception as e:
-            logger.error(f"get_quote({trading_symbol}) failed: {e}")
-            raise
-
-    def get_oi(self, trading_symbol: str) -> dict:
-        """
-        Fetch Open Interest data for an MCX futures contract.
+        Fetch Open Interest data for a commodity futures contract.
         Uses get_quote() which returns open_interest, oi_day_change,
         previous_open_interest from the Groww API.
 
@@ -229,7 +220,7 @@ class GrowwClient:
         or empty dict if fetch fails.
         """
         try:
-            quote = self.get_quote(trading_symbol)
+            quote = self.get_quote(trading_symbol, exchange=exchange)
 
             if not quote:
                 return {}
@@ -327,7 +318,7 @@ class GrowwClient:
         try:
             result = self._groww.get_historical_candle_data(
                 trading_symbol=trading_symbol,
-                exchange=self._groww.EXCHANGE_MCX,
+                exchange=exchange,
                 segment=self._groww.SEGMENT_COMMODITY,
                 start_time=start_time,
                 end_time=end_time,
@@ -392,17 +383,18 @@ class GrowwClient:
 
     # ── Order Execution (Production Only) ──────────────────────────
 
-    def place_mcx_order(
+    def place_commodity_order(
         self,
         trading_symbol:   str,
         transaction_type: str,
         lots:             int,
+        exchange:         str   = "MCX",
         order_type:       str   = "MARKET",
         price:            float = 0.0,
         reference_id:     str   = None,
     ) -> dict:
         """
-        Place an MCX NRML order.
+        Place a commodity NRML order.
 
         trading_symbol:   e.g. "GOLDM03APR26FUT"
         transaction_type: "BUY" or "SELL"
@@ -433,7 +425,7 @@ class GrowwClient:
 
         result = self._groww.place_order(
             validity          = self._groww.VALIDITY_DAY,
-            exchange          = self._groww.EXCHANGE_MCX,
+            exchange          = exchange,
             order_type        = sdk_order_type,
             product           = self._groww.PRODUCT_NRML,
             quantity          = lots,
@@ -444,10 +436,30 @@ class GrowwClient:
             order_reference_id = reference_id,
         )
         logger.info(
-            f"MCX order placed: {transaction_type} {lots} lots "
+            f"{exchange} order placed: {transaction_type} {lots} lots "
             f"{trading_symbol} [{order_type}] → {result}"
         )
         return result
+
+    def place_mcx_order(
+        self,
+        trading_symbol:   str,
+        transaction_type: str,
+        lots:             int,
+        order_type:       str   = "MARKET",
+        price:            float = 0.0,
+        reference_id:     str   = None,
+    ) -> dict:
+        """Backward-compatible wrapper for MCX commodity orders."""
+        return self.place_commodity_order(
+            trading_symbol=trading_symbol,
+            transaction_type=transaction_type,
+            lots=lots,
+            exchange="MCX",
+            order_type=order_type,
+            price=price,
+            reference_id=reference_id,
+        )
 
     def cancel_mcx_order(self, groww_order_id: str) -> dict:
         """Cancel an open MCX order. Production mode only."""
