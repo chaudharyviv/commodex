@@ -44,9 +44,9 @@ def _run_check(**overrides):
 
 
 def test_expiry_blackout_blocks_new_signal(monkeypatch):
-    _freeze_time(monkeypatch, real_datetime(2026, 3, 22, 10, 0))
+    _freeze_time(monkeypatch, real_datetime(2026, 3, 20, 10, 0))
 
-    result = _run_check(contract_expiry="2026-03-25")
+    result = _run_check(contract_expiry="2026-03-22")
 
     assert result["approved"] is False
     assert any("blackout" in reason.lower() for reason in result["block_reasons"])
@@ -54,7 +54,7 @@ def test_expiry_blackout_blocks_new_signal(monkeypatch):
 
 
 def test_intraday_cutoff_blocks_late_evening_system_signal(monkeypatch):
-    _freeze_time(monkeypatch, real_datetime(2026, 3, 22, 22, 15))
+    _freeze_time(monkeypatch, real_datetime(2026, 3, 20, 22, 15))
 
     result = _run_check(trading_style="intraday")
 
@@ -63,10 +63,20 @@ def test_intraday_cutoff_blocks_late_evening_system_signal(monkeypatch):
 
 
 def test_inr_volatility_caps_confidence_without_blocking(monkeypatch):
-    _freeze_time(monkeypatch, real_datetime(2026, 3, 22, 14, 15))
+    _freeze_time(monkeypatch, real_datetime(2026, 3, 20, 14, 15))
 
     result = _run_check(inr_change_pct=0.72)
 
     assert result["approved"] is True
     assert result["confidence_cap"] == CONFIDENCE_CAP_INR_VOLATILE
     assert any("INR/USD moved" in reason for reason in result["cap_reasons"])
+
+
+def test_market_hours_block_on_weekend(monkeypatch):
+    _freeze_time(monkeypatch, real_datetime(2026, 3, 22, 14, 15))
+
+    result = _run_check()
+
+    assert result["approved"] is False
+    assert any("Sunday" in reason for reason in result["block_reasons"])
+    assert any("Monday-Friday" in reason for reason in result["block_reasons"])
