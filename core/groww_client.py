@@ -1,7 +1,7 @@
 """
 COMMODEX — Groww API Client (SDK-based)
 Uses official growwapi Python SDK instead of raw HTTP calls.
-Auth: pre-generated access token via GrowwAPI.get_access_token()
+Auth: access token generated from GROWW_API_KEY + Groww TOTP when needed.
 
 Version: 1.1 — replaced hand-rolled HTTP client with growwapi SDK
 """
@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────────────────
 # TOKEN GENERATION HELPER
-# Call this once to generate your access token, then store in .env
+# Generate an access token from the Groww API key and TOTP secret, then
+# optionally cache it in .env as GROWW_ACCESS_TOKEN.
 # ─────────────────────────────────────────────────────────────────
 
 def generate_access_token(

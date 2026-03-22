@@ -444,14 +444,19 @@ def validate_config() -> list[str]:
     Called at app startup to surface missing or invalid config.
     Returns list of warning strings.
     Does not raise — lets the app display warnings gracefully.
+
+    Groww auth flow in this project:
+      - GROWW_API_KEY and GROWW_TOTP_SECRET are required.
+      - GROWW_ACCESS_TOKEN is optional at startup because the app can
+        generate and refresh it from the TOTP secret when needed.
     """
     config_warnings = []
 
     if not GROWW_API_KEY or GROWW_API_KEY == "your_api_key_here":
         config_warnings.append("GROWW_API_KEY not set in .env")
 
-    if not GROWW_API_SECRET or GROWW_API_SECRET == "your_api_secret_here":
-        config_warnings.append("GROWW_API_SECRET not set in .env")
+    if not GROWW_TOTP_SECRET or GROWW_TOTP_SECRET == "your_totp_secret_here":
+        config_warnings.append("GROWW_TOTP_SECRET not set in .env")
 
     if TRADING_MODE == "demo":
         if not ACTIVE_LLM["api_key"] or \
