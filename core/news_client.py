@@ -30,12 +30,27 @@ NEWS_QUERIES = {
         "OPEC production crude oil India",
         "US EIA crude inventory weekly report",
     ],
+    "SILVERM": [
+        "MCX silver mini price India today",
+        "silver India demand rupee industrial metals",
+        "COMEX silver dollar index Federal Reserve",
+    ],
+    "SILVER": [
+        "MCX silver price India today",
+        "silver India demand rupee industrial metals",
+        "COMEX silver dollar index Federal Reserve",
+    ],
+    "NATURALGASM": [
+        "MCX natural gas mini price India today",
+        "Henry Hub natural gas LNG Asia demand",
+        "US natural gas storage weekly report",
+    ],
 }
 
 # Fallback for unknown symbols
 DEFAULT_QUERIES = [
-    "MCX commodity India today",
-    "commodity market India news",
+    "Indian commodity market news today",
+    "MCX NCDEX commodity news India",
 ]
 
 
