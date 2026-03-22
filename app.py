@@ -272,7 +272,7 @@ def render_dashboard():
     # ── Live Positions (Production Mode) ───────────────────────
     if TRADING_MODE == "production":
         st.divider()
-        st.subheader("Live Positions")
+        st.subheader("Live Broker Positions (Groww)")
     
         @st.cache_data(ttl=30)
         def fetch_live_positions():
@@ -331,6 +331,8 @@ def render_signal_engine():
         render_technicals, render_risk_params,
         render_guardrails,
     )
+    from core.db import get_connection, init as db_init, get_trades as db_get_trades, apply_trade_reconciliation
+    from config import TRADING_MODE, ACTIVE_LLM, MIN_CONFIDENCE_THRESHOLD, LOT_CONFIG
     from core.db import get_connection, init as db_init
     from config import (
         TRADING_MODE,
@@ -629,6 +631,7 @@ def render_signal_engine():
             ):
                 st.divider()
                 st.subheader("🔴 Execute Trade — REAL MONEY")
+                st.caption("Places a broker order on Groww and stores a separate local trade record for later reconciliation.")
     
                 lots      = result.position_sizing.get("position_lots", 1) if result.position_sizing else 1
                 entry_px  = result.risk.entry_price if result.risk else 0
@@ -708,6 +711,11 @@ def render_signal_engine():
                                 or order_res.get("order_id")
                                 or str(order_res)
                             )
+                            entry_snapshot = _gc2.get_mcx_order_snapshot(
+                                groww_order_id,
+                                _gc2.get_mcx_order_book(),
+                            )
+                            local_order_status = entry_snapshot.get("normalised_status") or "OPEN"
     
                             # Log to trades_log
                             _conn = get_connection()
@@ -732,8 +740,8 @@ def render_signal_engine():
                                 t1_px,
                                 result.risk.target_2 if result.risk else None,
                                 groww_order_id,
-                                "OPEN",
-                                "Executed via COMMODEX production mode",
+                                local_order_status,
+                                "Executed via COMMODEX production mode; reconcile against Groww for lifecycle updates",
                             ))
                             _conn.execute(
                                 "UPDATE signals_log SET followed=1 WHERE id=?",
@@ -797,6 +805,8 @@ def render_trade_log():
     load_dotenv()
     
     from core.ui_helpers import render_sidebar
+    from core.db import get_connection, init as db_init, get_trades as db_get_trades, apply_trade_reconciliation
+    from config import TRADING_MODE, CAPITAL_INR
     from core.db import get_connection, init as db_init
     from config import (
         TRADING_MODE,
@@ -811,7 +821,7 @@ def render_trade_log():
     
     
     st.title("📋 Trade Log")
-    st.caption("Signal history, paper trades, and performance tracking")
+    st.caption("Signal history, local trade records, and broker reconciliation status")
     
     # ── Filters ────────────────────────────────────────────────
     commodity_filter_options = ["All", *get_active_instrument_symbols()]
@@ -945,31 +955,44 @@ def render_trade_log():
     
     # ── Trade Log ──────────────────────────────────────────────
     st.divider()
-    mode_label = "Real Trades" if TRADING_MODE == "production" else "Paper Trades"
-    st.subheader(mode_label)
-    
-    def get_trades() -> pd.DataFrame:
+    if TRADING_MODE == "production":
+        st.subheader("Local Trade Records")
+        st.caption("These rows live in COMMODEX and are reconciled against Groww positions/orders.")
+    else:
+        st.subheader("Paper Trades")
+
+    def load_trades_df() -> pd.DataFrame:
+        rows = db_get_trades(mode=TRADING_MODE)
+        return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+    def build_groww_client():
+        from generate_token import generate_totp_token, save_token_to_env
+        import os as _os
+        from core.groww_client import GrowwClient as _GC
+
+        tok = generate_totp_token()
+        save_token_to_env(tok)
+        _os.environ["GROWW_ACCESS_TOKEN"] = tok
+        return _GC(access_token=tok)
+
+    broker_message = None
+    if TRADING_MODE == "production" and st.button("🔄 Reconcile Local Trades with Groww", key="reconcile_trades_btn"):
         try:
-            conn = get_connection()
-            df   = pd.read_sql_query("""
-                SELECT id, entry_time, exit_time, commodity, action,
-                       lots, entry_price, exit_price,
-                       stop_loss, target_1, pnl_inr, pnl_pct,
-                       exit_reason, order_id, order_status
-                FROM trades_log
-                WHERE mode = ?
-                ORDER BY entry_time DESC
-            """, conn, params=[TRADING_MODE])
-            conn.close()
-            return df
-        except Exception:
-            return pd.DataFrame()
-    
-    trades_df = get_trades()
-    
+            gc = build_groww_client()
+            updates = gc.reconcile_trades(db_get_trades(mode=TRADING_MODE), capital_inr=CAPITAL_INR)
+            changed = apply_trade_reconciliation(updates)
+            broker_message = ("success", f"Applied {changed} trade reconciliation update(s) from Groww.")
+        except Exception as _re:
+            broker_message = ("error", f"Groww reconciliation failed: {_re}")
+
+    if broker_message:
+        getattr(st, broker_message[0])(broker_message[1])
+
+    trades_df = load_trades_df()
+
     if trades_df.empty:
         if TRADING_MODE == "production":
-            st.info("No trades logged yet. Execute a signal from the Signal Engine.")
+            st.info("No local production trades logged yet. Execute a signal from the Signal Engine.")
         else:
             st.info(
                 "No paper trades logged yet. "
@@ -980,12 +1003,13 @@ def render_trade_log():
             c for c in [
                 "entry_time", "exit_time", "commodity", "action", "lots",
                 "entry_price", "exit_price", "stop_loss", "target_1",
-                "pnl_inr", "pnl_pct", "exit_reason", "order_status",
+                "pnl_inr", "pnl_pct", "exit_reason", "order_id",
+                "exit_order_id", "order_status",
             ] if c in trades_df.columns
         ]
         st.dataframe(trades_df[display_cols], width='stretch')
-    
-        total_pnl = trades_df["pnl_inr"].sum() if "pnl_inr" in trades_df else 0
+
+        total_pnl = trades_df["pnl_inr"].fillna(0).sum() if "pnl_inr" in trades_df else 0
         tc1, tc2, tc3 = st.columns(3)
         with tc1:
             st.metric(
@@ -1000,35 +1024,50 @@ def render_trade_log():
             st.metric("Win Rate", f"{win_rate}%")
         with tc3:
             st.metric("Total Trades", len(trades_df))
-    
+
     # ── Exit Trade Form ─────────────────────────────────────────
     st.divider()
-    st.subheader("Log Trade Exit")
-    
     open_trades = trades_df[trades_df["exit_time"].isna()] if not trades_df.empty else pd.DataFrame()
-    
+
+    if TRADING_MODE == "production":
+        st.subheader("Production Exit Workflow")
+        st.caption("Local trades cannot be marked closed unless Groww confirms the exit or you intentionally mark the trade as manual/off-platform.")
+    else:
+        st.subheader("Log Paper Trade Exit")
+
     if open_trades.empty:
-        st.info("No open trades to close.")
+        st.info("No open trades to manage.")
     else:
         trade_options = {
             row["id"]: (
                 f"#{row['id']}  {row['commodity']}  {row['action']}  "
                 f"{row['lots']} lot(s)  @ Rs{row['entry_price']:,.2f}  "
-                f"(SL: Rs{row['stop_loss']:,.2f}  T1: Rs{row['target_1']:,.2f})"
+                f"(status: {row.get('order_status') or 'N/A'})"
             )
             for _, row in open_trades.iterrows()
         }
-    
+
         selected_id = st.selectbox(
-            "Select open trade to close:",
+            "Select open trade:",
             options=list(trade_options.keys()),
             format_func=lambda x: trade_options[x],
         )
-    
+
         if selected_id:
             sel_row  = open_trades[open_trades["id"] == selected_id].iloc[0]
             lots_val = int(sel_row["lots"])
             entry_px = float(sel_row["entry_price"])
+            action   = sel_row["action"]
+            current_status = str(sel_row.get("order_status") or "UNKNOWN")
+
+            st.info(
+                f"Entry order: **{sel_row.get('order_id') or 'N/A'}**  |  "
+                f"Exit order: **{sel_row.get('exit_order_id') or 'N/A'}**  |  "
+                f"Local status: **{current_status}**"
+            )
+
+            from config import LOT_CONFIG as _LC
+            lot_cfg     = _LC.get(sel_row["commodity"], {})
             sl_px    = float(sel_row["stop_loss"]) if sel_row["stop_loss"] else 0.0
             t1_px    = float(sel_row["target_1"])  if sel_row["target_1"]  else 0.0
     
@@ -1056,87 +1095,208 @@ def render_trade_log():
             lot_cfg     = LOT_CONFIG.get(sel_row["commodity"], {})
             pl_per_tick = lot_cfg.get("pl_per_tick", 10)
             tick_sz     = lot_cfg.get("tick_size", 1)
-    
-            if action == "BUY":
-                ticks = (exit_price - entry_px) / tick_sz
-            else:
-                ticks = (entry_px - exit_price) / tick_sz
-    
-            pnl_inr = ticks * pl_per_tick * lots_val
-            pnl_pct = round(pnl_inr / CAPITAL_INR * 100, 3) if CAPITAL_INR else 0
-    
-            pnl_col = "🟢" if pnl_inr >= 0 else "🔴"
-            st.info(
-                f"{pnl_col} Estimated P&L: **Rs{pnl_inr:+,.0f}** "
-                f"({pnl_pct:+.2f}% of capital)"
-            )
-    
-            if st.button("✅ Log Exit", type="primary", key="log_exit"):
-                try:
-                    _conn = get_connection()
-                    _conn.execute("""
-                        UPDATE trades_log
-                        SET exit_price  = ?,
-                            exit_time   = ?,
-                            pnl_inr     = ?,
-                            pnl_pct     = ?,
-                            exit_reason = ?,
-                            notes       = ?,
-                            order_status = 'CLOSED'
-                        WHERE id = ?
-                    """, (
-                        exit_price,
-                        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                        round(pnl_inr, 2),
-                        pnl_pct,
-                        exit_reason,
-                        exit_notes or None,
-                        selected_id,
-                    ))
-                    _conn.commit()
-                    _conn.close()
-                    st.success(
-                        f"Trade #{selected_id} closed.  "
-                        f"P&L: Rs{pnl_inr:+,.0f} ({pnl_pct:+.2f}%)"
+
+            if TRADING_MODE == "production":
+                exit_method = st.radio(
+                    "Exit handling",
+                    options=["Place Groww exit order", "Mark manual / off-platform close"],
+                    key=f"exit_method_{selected_id}",
+                )
+
+                if exit_method == "Place Groww exit order":
+                    ex1, ex2 = st.columns(2)
+                    with ex1:
+                        exit_order_type = st.selectbox(
+                            "Exit Order Type", ["MARKET", "LIMIT"], key=f"exit_order_type_{selected_id}"
+                        )
+                    with ex2:
+                        exit_limit_price = st.number_input(
+                            "Exit Limit Price (Rs)",
+                            min_value=0.0,
+                            value=float(sel_row["target_1"]) if sel_row.get("target_1") else entry_px,
+                            step=0.5,
+                            format="%.2f",
+                            key=f"exit_limit_price_{selected_id}",
+                        )
+
+                    if sel_row.get("exit_order_id") and current_status in {"EXIT_PENDING", "OPEN", "PARTIALLY_FILLED"}:
+                        st.warning("An exit order is already linked to this trade. Reconcile with Groww before placing another exit.")
+                    elif st.button("🔻 Place Broker Exit Order", type="primary", key=f"place_exit_{selected_id}"):
+                        try:
+                            gc = build_groww_client()
+                            contract_sym = str(sel_row["contract"]).removeprefix("MCX_")
+                            exit_res = gc.place_mcx_exit_order(
+                                trading_symbol = contract_sym,
+                                entry_action   = action,
+                                lots           = lots_val,
+                                order_type     = exit_order_type,
+                                price          = exit_limit_price if exit_order_type == "LIMIT" else 0.0,
+                                reference_id   = f"commodex-exit-{selected_id}",
+                            )
+                            exit_order_id = exit_res.get("groww_order_id") or exit_res.get("order_id") or str(exit_res)
+                            exit_snapshot = gc.get_mcx_order_snapshot(exit_order_id, gc.get_mcx_order_book())
+                            apply_trade_reconciliation([{
+                                "id": int(selected_id),
+                                "exit_order_id": exit_order_id,
+                                "order_status": "EXIT_PENDING" if exit_snapshot.get("normalised_status") in {"OPEN", "PARTIALLY_FILLED", "UNKNOWN"} else exit_snapshot.get("normalised_status"),
+                                "notes": f"Exit order placed on Groww ({exit_order_type})",
+                            }])
+                            st.success(
+                                f"Exit order submitted to Groww: **{exit_order_id}**. "
+                                "Use reconciliation to confirm the broker-side fill before local closure."
+                            )
+                            st.rerun()
+                        except Exception as _pe:
+                            st.error(f"Failed to place broker exit order: {_pe}")
+                else:
+                    em1, em2 = st.columns(2)
+                    with em1:
+                        manual_exit_price = st.number_input(
+                            "Manual Exit Price (Rs)",
+                            min_value=0.0,
+                            value=entry_px,
+                            step=0.5,
+                            format="%.2f",
+                            key=f"manual_exit_px_{selected_id}",
+                        )
+                    with em2:
+                        manual_exit_reason = st.selectbox(
+                            "Manual Exit Reason",
+                            ["MANUAL_OFF_PLATFORM", "BROKER_ASSISTED", "SESSION_END", "OTHER"],
+                            key=f"manual_exit_reason_{selected_id}",
+                        )
+                    manual_exit_notes = st.text_input(
+                        "Manual/Off-platform notes (required)",
+                        key=f"manual_exit_notes_{selected_id}",
                     )
-                    st.rerun()
-                except Exception as _e:
-                    st.error(f"Failed to log exit: {_e}")
-    
-    # ── Live Groww Positions (Production Mode) ─────────────────
+
+                    if action == "BUY":
+                        ticks = (manual_exit_price - entry_px) / tick_sz
+                    else:
+                        ticks = (entry_px - manual_exit_price) / tick_sz
+                    pnl_inr = round(ticks * pl_per_tick * lots_val, 2)
+                    pnl_pct = round(pnl_inr / CAPITAL_INR * 100, 3) if CAPITAL_INR else 0
+                    st.info(
+                        f"Manual/off-platform P&L preview: **Rs{pnl_inr:+,.0f}** "
+                        f"({pnl_pct:+.2f}% of capital)"
+                    )
+
+                    if st.button("📝 Mark Manual / Off-Platform Close", type="primary", key=f"manual_close_{selected_id}"):
+                        if not manual_exit_notes.strip():
+                            st.error("Add notes explaining why this trade was closed manually/off-platform.")
+                        else:
+                            apply_trade_reconciliation([{
+                                "id": int(selected_id),
+                                "exit_price": round(float(manual_exit_price), 2),
+                                "exit_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                "pnl_inr": pnl_inr,
+                                "pnl_pct": pnl_pct,
+                                "exit_reason": manual_exit_reason,
+                                "notes": manual_exit_notes.strip(),
+                                "order_status": "MANUAL_OFF_PLATFORM",
+                            }])
+                            st.success("Trade marked as manual/off-platform and closed locally.")
+                            st.rerun()
+            else:
+                ec1, ec2 = st.columns(2)
+                with ec1:
+                    exit_price = st.number_input(
+                        "Exit Price (Rs)",
+                        min_value   = 0.0,
+                        value       = float(sel_row["target_1"]) if sel_row.get("target_1") else entry_px,
+                        step        = 0.5,
+                        format      = "%.2f",
+                        key         = "exit_px",
+                    )
+                with ec2:
+                    exit_reason = st.selectbox(
+                        "Exit Reason",
+                        ["T1_HIT", "T2_HIT", "SL_HIT", "MANUAL", "SESSION_END", "OTHER"],
+                        key = "exit_reason",
+                    )
+
+                exit_notes = st.text_input("Notes (optional)", key="exit_notes")
+                ticks = (exit_price - entry_px) / tick_sz if action == "BUY" else (entry_px - exit_price) / tick_sz
+                pnl_inr = round(ticks * pl_per_tick * lots_val, 2)
+                pnl_pct = round(pnl_inr / CAPITAL_INR * 100, 3) if CAPITAL_INR else 0
+                pnl_col = "🟢" if pnl_inr >= 0 else "🔴"
+                st.info(
+                    f"{pnl_col} Estimated P&L: **Rs{pnl_inr:+,.0f}** "
+                    f"({pnl_pct:+.2f}% of capital)"
+                )
+
+                if st.button("✅ Log Exit", type="primary", key="log_exit"):
+                    try:
+                        _conn = get_connection()
+                        _conn.execute("""
+                            UPDATE trades_log
+                            SET exit_price  = ?,
+                                exit_time   = ?,
+                                pnl_inr     = ?,
+                                pnl_pct     = ?,
+                                exit_reason = ?,
+                                notes       = ?,
+                                order_status = 'CLOSED'
+                            WHERE id = ?
+                        """, (
+                            exit_price,
+                            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            round(pnl_inr, 2),
+                            pnl_pct,
+                            exit_reason,
+                            exit_notes or None,
+                            selected_id,
+                        ))
+                        _conn.commit()
+                        _conn.close()
+                        st.success(
+                            f"Trade #{selected_id} closed.  "
+                            f"P&L: Rs{pnl_inr:+,.0f} ({pnl_pct:+.2f}%)"
+                        )
+                        st.rerun()
+                    except Exception as _e:
+                        st.error(f"Failed to log exit: {_e}")
+
+    # ── Live Groww Positions / Orders (Production Mode) ───────
     if TRADING_MODE == "production":
         st.divider()
-        st.subheader("Live Groww Positions")
-    
-        if st.button("🔄 Refresh from Groww", key="refresh_positions"):
+        st.subheader("Live Broker Positions / Orders (Groww)")
+        st.caption("This is broker-side state and may differ from local records until reconciliation runs.")
+
+        if st.button("🔄 Refresh Groww Snapshot", key="refresh_positions"):
             st.cache_data.clear()
-    
+
         @st.cache_data(ttl=30)
-        def fetch_groww_positions():
+        def fetch_groww_snapshot():
             try:
-                from generate_token import generate_totp_token, save_token_to_env
-                import os as _os
-                tok = generate_totp_token()
-                save_token_to_env(tok)
-                _os.environ["GROWW_ACCESS_TOKEN"] = tok
-    
-                from core.groww_client import GrowwClient as _GC
-                gc   = _GC(access_token=tok)
-                return gc.get_live_positions(), None
+                gc = build_groww_client()
+                return {
+                    "positions": gc.get_live_positions(),
+                    "orders": gc.get_mcx_order_book(),
+                    "error": None,
+                }
             except Exception as _e:
-                return [], str(_e)
-    
-        positions, pos_err = fetch_groww_positions()
-    
-        if pos_err:
-            st.warning(f"Could not fetch positions: {pos_err}")
-        elif not positions:
-            st.info("No open commodity positions on Groww.")
+                return {"positions": [], "orders": [], "error": str(_e)}
+
+        broker_snapshot = fetch_groww_snapshot()
+
+        if broker_snapshot["error"]:
+            st.warning(f"Could not fetch Groww broker snapshot: {broker_snapshot['error']}")
         else:
-            pos_df = pd.DataFrame(positions)
-            st.dataframe(pos_df, width='stretch')
-    
-            # Cancel order helper (open orders)
+            positions = broker_snapshot["positions"]
+            orders = broker_snapshot["orders"]
+            if not positions:
+                st.info("No open commodity positions on Groww.")
+            else:
+                st.markdown("**Live Positions**")
+                st.dataframe(pd.DataFrame(positions), width='stretch')
+
+            if orders:
+                st.markdown("**Today's MCX Orders**")
+                st.dataframe(pd.DataFrame(orders), width='stretch')
+            else:
+                st.info("No MCX orders returned from Groww for the current snapshot.")
+
             st.divider()
             st.subheader("Cancel Pending Order")
             cancel_id = st.text_input(
@@ -1145,10 +1305,8 @@ def render_trade_log():
             )
             if cancel_id and st.button("Cancel Order", key="cancel_btn"):
                 try:
-                    from core.groww_client import GrowwClient as _GC3
-                    import os as _os3
-                    _gc3 = _GC3(access_token=_os3.getenv("GROWW_ACCESS_TOKEN"))
-                    res = _gc3.cancel_mcx_order(cancel_id)
+                    gc_cancel = build_groww_client()
+                    res = gc_cancel.cancel_mcx_order(cancel_id)
                     st.success(f"Cancel response: {res}")
                 except Exception as _ce:
                     st.error(f"Cancel failed: {_ce}")

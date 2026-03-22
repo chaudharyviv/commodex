@@ -11,7 +11,7 @@ import logging
 import pandas as pd
 import pyotp
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Any, Optional
 from growwapi import GrowwAPI
 
 from config import (
@@ -21,6 +21,152 @@ from config import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _clean_string(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _normalise_order_status(value: Any) -> str:
+    raw = _clean_string(value).upper().replace("-", "_").replace(" ", "_")
+    mapping = {
+        "OPEN": "OPEN",
+        "ORDER_OPEN": "OPEN",
+        "TRIGGER_PENDING": "OPEN",
+        "PENDING": "OPEN",
+        "PUT_ORDER_REQ_RECEIVED": "OPEN",
+        "COMPLETE": "FILLED",
+        "COMPLETED": "FILLED",
+        "EXECUTED": "FILLED",
+        "FILLED": "FILLED",
+        "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+        "PARTIAL": "PARTIALLY_FILLED",
+        "PARTIALLY_EXECUTED": "PARTIALLY_FILLED",
+        "CANCELLED": "CANCELLED",
+        "CANCELED": "CANCELLED",
+        "REJECTED": "REJECTED",
+        "FAILED": "REJECTED",
+        "CLOSED": "CLOSED",
+        "EXIT_PENDING": "EXIT_PENDING",
+        "MANUAL": "MANUAL",
+        "MANUAL_OFF_PLATFORM": "MANUAL_OFF_PLATFORM",
+    }
+    return mapping.get(raw, raw or "UNKNOWN")
+
+
+def _as_float(*values: Any) -> Optional[float]:
+    for value in values:
+        if value in (None, "", "null"):
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _as_int(*values: Any) -> Optional[int]:
+    for value in values:
+        if value in (None, "", "null"):
+            continue
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _parse_timestamp(*values: Any) -> Optional[str]:
+    for value in values:
+        if not value:
+            continue
+        if isinstance(value, datetime):
+            return value.strftime("%Y-%m-%d %H:%M:%S")
+        cleaned = str(value).replace("T", " ").replace("Z", "").strip()
+        for fmt in (
+            "%Y-%m-%d %H:%M:%S.%f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%d",
+        ):
+            try:
+                return datetime.strptime(cleaned, fmt).strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+        return cleaned
+    return None
+
+
+def _extract_order_id(payload: dict) -> Optional[str]:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("groww_order_id", "order_id", "id"):
+        value = payload.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _extract_trading_symbol(payload: dict) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    return _clean_string(
+        payload.get("trading_symbol")
+        or payload.get("symbol")
+        or payload.get("tradingsymbol")
+        or payload.get("exchange_trading_symbol")
+    ).upper().removeprefix("MCX_")
+
+
+def _extract_order_avg_price(payload: dict) -> Optional[float]:
+    return _as_float(
+        payload.get("average_price"),
+        payload.get("avg_price"),
+        payload.get("filled_price"),
+        payload.get("price"),
+    )
+
+
+def _extract_order_filled_qty(payload: dict) -> Optional[int]:
+    return _as_int(
+        payload.get("filled_quantity"),
+        payload.get("filled_qty"),
+        payload.get("executed_quantity"),
+        payload.get("quantity_filled"),
+        payload.get("quantity"),
+    )
+
+
+def _extract_position_quantity(payload: dict) -> int:
+    qty = _as_int(
+        payload.get("net_quantity"),
+        payload.get("net_qty"),
+        payload.get("quantity"),
+        payload.get("qty"),
+    )
+    return qty or 0
+
+
+def _extract_position_price(payload: dict) -> Optional[float]:
+    return _as_float(
+        payload.get("average_price"),
+        payload.get("avg_price"),
+        payload.get("net_price"),
+        payload.get("ltp"),
+        payload.get("last_price"),
+    )
+
+
+def _pnl_for_trade(commodity: str, action: str, lots: int, entry_price: float, exit_price: float) -> float:
+    lot_cfg = LOT_CONFIG.get(commodity or "", {})
+    tick_size = float(lot_cfg.get("tick_size", 1) or 1)
+    pl_per_tick = float(lot_cfg.get("pl_per_tick", 0) or 0)
+    if str(action).upper() == "BUY":
+        ticks = (exit_price - entry_price) / tick_size
+    else:
+        ticks = (entry_price - exit_price) / tick_size
+    return round(ticks * pl_per_tick * int(lots or 0), 2)
+
+
 
 # ─────────────────────────────────────────────────────────────────
 # TOKEN GENERATION HELPER
@@ -425,6 +571,15 @@ class GrowwClient:
         )
 
         result = self._groww.place_order(
+            validity           = self._groww.VALIDITY_DAY,
+            exchange           = self._groww.EXCHANGE_MCX,
+            order_type         = sdk_order_type,
+            product            = self._groww.PRODUCT_NRML,
+            quantity           = lots,
+            segment            = self._groww.SEGMENT_COMMODITY,
+            trading_symbol     = trading_symbol,
+            transaction_type   = sdk_txn_type,
+            price              = price if order_type.upper() == "LIMIT" else 0.0,
             validity          = self._groww.VALIDITY_DAY,
             exchange          = exchange,
             order_type        = sdk_order_type,
@@ -442,6 +597,24 @@ class GrowwClient:
         )
         return result
 
+    def place_mcx_exit_order(
+        self,
+        trading_symbol: str,
+        entry_action: str,
+        lots: int,
+        order_type: str = "MARKET",
+        price: float = 0.0,
+        reference_id: str = None,
+    ) -> dict:
+        """Place the opposite-side MCX order required to exit an open position."""
+        exit_side = "SELL" if _clean_string(entry_action).upper() == "BUY" else "BUY"
+        return self.place_mcx_order(
+            trading_symbol   = trading_symbol,
+            transaction_type = exit_side,
+            lots             = lots,
+            order_type       = order_type,
+            price            = price,
+            reference_id     = reference_id,
     def place_mcx_order(
         self,
         trading_symbol:   str,
@@ -498,6 +671,36 @@ class GrowwClient:
             logger.error(f"get_mcx_order_book failed: {e}")
             return []
 
+    def get_mcx_order_snapshot(
+        self,
+        groww_order_id: str,
+        order_book: Optional[list[dict]] = None,
+    ) -> dict:
+        """Merge order-book and direct status payloads into one normalized snapshot."""
+        order_book = order_book or []
+        order_book_item = next(
+            (item for item in order_book if _extract_order_id(item) == str(groww_order_id)),
+            {},
+        )
+        status_payload = self.get_mcx_order_status(groww_order_id) or {}
+        merged = {**order_book_item, **status_payload}
+        merged["groww_order_id"] = groww_order_id
+        merged["normalised_status"] = _normalise_order_status(
+            merged.get("order_status")
+            or merged.get("status")
+            or merged.get("state")
+        )
+        merged["filled_quantity"] = _extract_order_filled_qty(merged)
+        merged["average_price"] = _extract_order_avg_price(merged)
+        merged["trading_symbol"] = _extract_trading_symbol(merged)
+        merged["updated_at"] = _parse_timestamp(
+            merged.get("updated_at"),
+            merged.get("exchange_timestamp"),
+            merged.get("order_timestamp"),
+            merged.get("timestamp"),
+        )
+        return merged
+
     def get_margin_available(self) -> dict:
         """
         Get available commodity margin from Groww account.
@@ -523,6 +726,90 @@ class GrowwClient:
         except Exception as e:
             logger.error(f"get_live_positions failed: {e}")
             return []
+
+    def _find_matching_position(self, trade: dict, live_positions: list[dict]) -> Optional[dict]:
+        trade_contract = _clean_string(trade.get("contract")).upper().removeprefix("MCX_")
+        trade_commodity = _clean_string(trade.get("commodity")).upper()
+        for position in live_positions:
+            pos_symbol = _extract_trading_symbol(position)
+            pos_qty = abs(_extract_position_quantity(position))
+            if pos_qty <= 0:
+                continue
+            if trade_contract and pos_symbol == trade_contract:
+                return position
+            if trade_commodity and pos_symbol.startswith(trade_commodity):
+                return position
+        return None
+
+    def reconcile_trade(self, trade: dict, live_positions: list[dict], order_book: list[dict]) -> dict:
+        """Return a DB-ready update dict for a single local trade using broker state."""
+        update = {"id": trade["id"]}
+        entry_snapshot = {}
+        exit_snapshot = {}
+
+        if trade.get("order_id"):
+            entry_snapshot = self.get_mcx_order_snapshot(str(trade["order_id"]), order_book)
+            update["order_status"] = entry_snapshot.get("normalised_status") or trade.get("order_status") or "UNKNOWN"
+
+        matching_position = self._find_matching_position(trade, live_positions)
+        if matching_position:
+            pos_qty = abs(_extract_position_quantity(matching_position))
+            lots = int(trade.get("lots") or 0)
+            if pos_qty and lots and pos_qty < lots:
+                update["order_status"] = "PARTIALLY_FILLED"
+            elif pos_qty:
+                update["order_status"] = "OPEN"
+
+        if trade.get("exit_order_id"):
+            exit_snapshot = self.get_mcx_order_snapshot(str(trade["exit_order_id"]), order_book)
+            exit_status = exit_snapshot.get("normalised_status")
+            update["order_status"] = (
+                "EXIT_PENDING" if exit_status in {"OPEN", "PARTIALLY_FILLED"}
+                else exit_status or update.get("order_status")
+            )
+
+            if exit_status == "FILLED":
+                exit_price = _extract_order_avg_price(exit_snapshot)
+                if exit_price is not None:
+                    pnl_inr = _pnl_for_trade(
+                        trade.get("commodity"),
+                        trade.get("action"),
+                        int(trade.get("lots") or 0),
+                        float(trade.get("entry_price") or 0),
+                        float(exit_price),
+                    )
+                    update.update({
+                        "exit_price": round(float(exit_price), 2),
+                        "exit_time": exit_snapshot.get("updated_at") or _parse_timestamp(datetime.now()),
+                        "exit_reason": trade.get("exit_reason") or "BROKER_EXIT_FILLED",
+                        "pnl_inr": pnl_inr,
+                        "pnl_pct": round((pnl_inr / trade.get("capital_base", 1)) * 100, 3) if trade.get("capital_base") else trade.get("pnl_pct"),
+                        "order_status": "CLOSED",
+                    })
+                else:
+                    update["order_status"] = "EXIT_FILLED_PENDING_PRICE"
+            elif exit_status in {"CANCELLED", "REJECTED"}:
+                update["order_status"] = exit_status
+
+        elif not matching_position and update.get("order_status") == "FILLED" and not trade.get("exit_time"):
+            update["order_status"] = "ENTRY_FILLED_NO_LIVE_POSITION"
+
+        if trade.get("exit_time") and trade.get("order_status") == "MANUAL_OFF_PLATFORM":
+            update["order_status"] = "MANUAL_OFF_PLATFORM"
+
+        return update
+
+    def reconcile_trades(self, trades: list[dict], capital_inr: Optional[float] = None) -> list[dict]:
+        """Reconcile local trades against live positions plus Groww order state."""
+        live_positions = self.get_live_positions()
+        order_book = self.get_mcx_order_book()
+        updates = []
+        for raw_trade in trades:
+            trade = dict(raw_trade)
+            if capital_inr and not trade.get("capital_base"):
+                trade["capital_base"] = capital_inr
+            updates.append(self.reconcile_trade(trade, live_positions, order_book))
+        return updates
 
     # ── Health Check ───────────────────────────────────────────────
 

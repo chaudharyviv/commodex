@@ -185,6 +185,61 @@ def _migrate():
     conn.close()
 
 
+
+def get_trades(mode: str = None, open_only: bool = False) -> list[dict]:
+    """Fetch local trades as dictionaries for UI and reconciliation."""
+    conn = get_connection()
+    cursor = conn.cursor()
+    query = """
+        SELECT id, signal_id, commodity, contract, mode, action, lots,
+               entry_price, entry_time, exit_price, exit_time, stop_loss,
+               target_1, target_2, target_hit, pnl_inr, pnl_pct, exit_reason,
+               notes, order_id, order_status, exit_order_id
+        FROM trades_log
+        WHERE 1=1
+    """
+    params = []
+    if mode:
+        query += " AND mode = ?"
+        params.append(mode)
+    if open_only:
+        query += " AND exit_time IS NULL"
+    query += " ORDER BY entry_time DESC, id DESC"
+    cursor.execute(query, params)
+    rows = [dict(row) for row in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def apply_trade_reconciliation(updates: list[dict]) -> int:
+    """Persist Groww reconciliation updates back into trades_log."""
+    if not updates:
+        return 0
+
+    allowed_fields = {
+        "exit_price", "exit_time", "pnl_inr", "pnl_pct", "exit_reason",
+        "notes", "order_id", "order_status", "exit_order_id",
+    }
+    conn = get_connection()
+    cursor = conn.cursor()
+    applied = 0
+
+    for update in updates:
+        trade_id = update.get("id")
+        if not trade_id:
+            continue
+        payload = {k: v for k, v in update.items() if k in allowed_fields}
+        if not payload:
+            continue
+        assignments = ", ".join(f"{col} = ?" for col in payload)
+        values = list(payload.values()) + [trade_id]
+        cursor.execute(f"UPDATE trades_log SET {assignments} WHERE id = ?", values)
+        applied += cursor.rowcount
+
+    conn.commit()
+    conn.close()
+    return applied
+
 def health_check() -> dict:
     """Quick check that DB is accessible and all tables exist."""
     expected_tables = {
