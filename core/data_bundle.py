@@ -27,6 +27,22 @@ from config import (
 logger = logging.getLogger(__name__)
 
 
+def _call_with_optional_exchange(method, trading_symbol: str, exchange: str, **kwargs):
+    """
+    Call Groww client helpers that may or may not support an ``exchange`` kwarg.
+
+    Some tests inject lightweight fake clients that implement the older signatures.
+    Falling back preserves compatibility while still using the exchange-aware path for
+    the real client.
+    """
+    try:
+        return method(trading_symbol, exchange=exchange, **kwargs)
+    except TypeError as exc:
+        if "exchange" not in str(exc):
+            raise
+        return method(trading_symbol, **kwargs)
+
+
 @dataclass
 class DataBundle:
     """
@@ -222,7 +238,11 @@ class DataBundleAssembler:
         # so we store temporarily here
         _oi_data = {}
         try:
-            _oi_data = self._groww.get_oi(trading_symbol, exchange=exchange)
+            _oi_data = _call_with_optional_exchange(
+                self._groww.get_oi,
+                trading_symbol,
+                exchange,
+            )
             if _oi_data:
                 logger.info(
                     f"OI fetched: {_oi_data.get('oi_interpretation')} | "
@@ -233,9 +253,10 @@ class DataBundleAssembler:
 
         # ── 2. Historical + Technicals ─────────────────────
         try:
-            candles = self._groww.get_historical(
-                trading_symbol=trading_symbol,
-                exchange=exchange,
+            candles = _call_with_optional_exchange(
+                self._groww.get_historical,
+                trading_symbol,
+                exchange,
                 interval=timeframe,
                 days=days,
             )

@@ -572,7 +572,7 @@ class GrowwClient:
 
         result = self._groww.place_order(
             validity           = self._groww.VALIDITY_DAY,
-            exchange           = self._groww.EXCHANGE_MCX,
+            exchange           = exchange,
             order_type         = sdk_order_type,
             product            = self._groww.PRODUCT_NRML,
             quantity           = lots,
@@ -580,15 +580,6 @@ class GrowwClient:
             trading_symbol     = trading_symbol,
             transaction_type   = sdk_txn_type,
             price              = price if order_type.upper() == "LIMIT" else 0.0,
-            validity          = self._groww.VALIDITY_DAY,
-            exchange          = exchange,
-            order_type        = sdk_order_type,
-            product           = self._groww.PRODUCT_NRML,
-            quantity          = lots,
-            segment           = self._groww.SEGMENT_COMMODITY,
-            trading_symbol    = trading_symbol,
-            transaction_type  = sdk_txn_type,
-            price             = price if order_type.upper() == "LIMIT" else 0.0,
             order_reference_id = reference_id,
         )
         logger.info(
@@ -615,6 +606,8 @@ class GrowwClient:
             order_type       = order_type,
             price            = price,
             reference_id     = reference_id,
+        )
+
     def place_mcx_order(
         self,
         trading_symbol:   str,
