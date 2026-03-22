@@ -19,8 +19,6 @@ from config import (
     MAX_OPEN_POSITIONS,
     MIN_CONFIDENCE_THRESHOLD,
     MIN_RR_RATIO,
-    MCX_OPEN_TIME,
-    MCX_CLOSE_TIME,
     INTRADAY_SIGNAL_CUTOFF_TIME,
     EXPIRY_BLACKOUT_DAYS,
     INR_VOLATILITY_GATE_PCT,
@@ -29,6 +27,7 @@ from config import (
     LOT_CONFIG,
 )
 from core.db import get_connection
+from core.market_hours import get_market_schedule_text, is_market_open
 
 logger = logging.getLogger(__name__)
 
@@ -233,18 +232,20 @@ class RiskEngine:
         now_ist  = datetime.now(IST)
         now_time = now_ist.strftime("%H:%M")
 
-        if MCX_OPEN_TIME <= now_time <= MCX_CLOSE_TIME:
+        if is_market_open(now_ist):
             return GuardrailResult(
                 name   = "G4_MarketHours",
                 passed = True,
                 reason = f"Market open: {now_time} IST"
             )
+
+        day_name = now_ist.strftime("%A")
         return GuardrailResult(
             name   = "G4_MarketHours",
             passed = False,
             reason = (
-                f"MCX market closed at {now_time} IST. "
-                f"Hours: {MCX_OPEN_TIME}–{MCX_CLOSE_TIME} IST"
+                f"MCX market closed at {now_time} IST on {day_name}. "
+                f"Schedule: {get_market_schedule_text()}"
             )
         )
 

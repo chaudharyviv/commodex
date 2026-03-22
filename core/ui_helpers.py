@@ -11,6 +11,7 @@ import streamlit as st
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from config import TRADING_MODE, LOT_CONFIG
+from core.market_hours import get_market_schedule_text, is_market_open
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -38,24 +39,29 @@ def render_mode_badge():
 
 def get_market_status() -> dict:
     """Return current MCX market status."""
-    now      = datetime.now(IST)
-    now_time = now.strftime("%H:%M")
-    is_open  = "09:00" <= now_time <= "23:30"
+    now = datetime.now(IST)
+    is_open = is_market_open(now)
     return {
         "is_open":    is_open,
         "time_ist":   now.strftime("%H:%M:%S IST"),
         "date":       now.strftime("%d %b %Y"),
+        "day":        now.strftime("%A"),
         "label":      "🟢 OPEN" if is_open else "🔴 CLOSED",
+        "schedule":   get_market_schedule_text(),
     }
 
 
 def render_market_status():
     """Render market status pill."""
     status = get_market_status()
+    message = (
+        f"MCX {status['label']}  |  {status['time_ist']}  |  "
+        f"{status['day']}  |  {status['schedule']}"
+    )
     if status["is_open"]:
-        st.success(f"MCX {status['label']}  |  {status['time_ist']}")
+        st.success(message)
     else:
-        st.error(f"MCX {status['label']}  |  {status['time_ist']}")
+        st.error(message)
 
 
 # ─────────────────────────────────────────────────────────────────
