@@ -3,9 +3,11 @@ COMMODEX — Groww TOTP Token Generator
 Generates a fresh Groww access token using TOTP authentication.
 
 Run:        python generate_token.py
-Auto-used:  GrowwClient calls this internally after 6 AM IST reset
+Usage:      Run this manually or let the app refresh GROWW_ACCESS_TOKEN
+            from GROWW_API_KEY + GROWW_TOTP_SECRET when needed.
 
-TOTP secret never expires — token regeneration is fully automatic.
+TOTP secret remains the long-lived credential; access tokens are short-lived
+and can be regenerated automatically.
 """
 
 import os

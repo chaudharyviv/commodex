@@ -1188,17 +1188,26 @@ def render_settings():
     
     # ── API Key Status ─────────────────────────────────────────
     st.subheader("API Key Status")
+    st.caption(
+        "Groww login uses your API key plus TOTP secret. "
+        "GROWW_ACCESS_TOKEN is generated automatically and can be cached in .env."
+    )
     
-    def check_key(env_var: str, label: str):
+    def check_key(env_var: str, label: str, *, required: bool = True):
         val = os.getenv(env_var, "")
-        if val and val != f"your_{env_var.lower()}_here":
+        placeholder = f"your_{env_var.lower()}_here"
+        configured = bool(val and val != placeholder)
+        if configured:
             st.success(f"✓ {label} configured")
-        else:
+        elif required:
             st.error(f"✗ {label} not set — add to .env")
+        else:
+            st.info(f"○ {label} not set — optional cached value")
     
-    check_key("GROWW_API_KEY",     "Groww TOTP Token")
-    check_key("GROWW_TOTP_SECRET", "Groww TOTP Secret")
-    check_key("OPENAI_API_KEY",    "OpenAI API Key (demo mode)")
+    check_key("GROWW_API_KEY",      "Groww API Key")
+    check_key("GROWW_TOTP_SECRET",  "Groww TOTP Secret")
+    check_key("GROWW_ACCESS_TOKEN", "Groww Access Token", required=False)
+    check_key("OPENAI_API_KEY",     "OpenAI API Key (demo mode)")
     check_key("ANTHROPIC_API_KEY", "Anthropic API Key (paper/production)")
     check_key("TAVILY_API_KEY",    "Tavily News API Key")
     
