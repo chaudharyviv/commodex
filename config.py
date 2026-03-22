@@ -51,7 +51,24 @@ ACTIVE_LLM = LLM_CONFIG[TRADING_MODE]
 # GROWW API
 # ─────────────────────────────────────────────────────────────────
 GROWW_API_KEY     = os.getenv("GROWW_API_KEY")
+GROWW_API_SECRET  = os.getenv("GROWW_API_SECRET")
 GROWW_TOTP_SECRET = os.getenv("GROWW_TOTP_SECRET")
+
+# ─────────────────────────────────────────────────────────────────
+# EXCHANGE CONFIGURATION
+# ─────────────────────────────────────────────────────────────────
+EXCHANGE_CONFIG = {
+    "MCX": {
+        "prefix":  "MCX",
+        "segment": "COMMODITY",
+        "label":   "Multi Commodity Exchange",
+    },
+    "NCDEX": {
+        "prefix":  "NCDEX",
+        "segment": "COMMODITY",
+        "label":   "National Commodity & Derivatives Exchange",
+    },
+}
 
 # ─────────────────────────────────────────────────────────────────
 # MCX LOT CONFIGURATION
@@ -109,6 +126,7 @@ LOT_CONFIG = {
         "pl_per_tick":     10.0,            # ₹10 per tick per lot  ← KEY NUMBER
         "margin_pct":      8.25,
         "friendly_name":   "Gold Mini (100g)",
+        "ui_icon":         "◈",
         "recommended":     True,            # ✓ best for personal account
         "active":          True,            # ✓ v1 scope
         "has_options":     True,
@@ -191,6 +209,7 @@ LOT_CONFIG = {
         "pl_per_tick":     10.0,            # ₹10 per tick per lot  ← KEY NUMBER
         "margin_pct":      34.25,
         "friendly_name":   "Crude Oil Mini (10 bbl)",
+        "ui_icon":         "⬡",
         "recommended":     True,            # ✓ best for personal account
         "active":          True,            # ✓ v1 scope
         "has_options":     True,
@@ -227,8 +246,9 @@ LOT_CONFIG = {
         "pl_per_tick":     5.0,             # ₹5 per tick per lot
         "margin_pct":      17.25,
         "friendly_name":   "Silver Mini (5kg)",
-        "recommended":     False,
-        "active":          False,           # v2 scope
+        "ui_icon":         "◇",
+        "recommended":     True,
+        "active":          True,
         "has_options":     True,
         "options_tick":    0.50,
         "options_pl_tick": 2.50,            # ₹2.50 per tick per lot
@@ -291,18 +311,73 @@ LOT_CONFIG = {
 # ACTIVE SCOPE
 # ─────────────────────────────────────────────────────────────────
 
-# v1 active contracts — everything else is reference data only
-ACTIVE_COMMODITIES   = ["GOLDM", "CRUDEOILM"]
-
-# Convenience lookups
-DEFAULT_GOLD_CONTRACT  = "GOLDM"
-DEFAULT_CRUDE_CONTRACT = "CRUDEOILM"
-
-# Helper: get only active contracts
+# Active contracts are the only user-selectable instruments.
+# LOT_CONFIG.active is the single source of truth.
 ACTIVE_LOT_CONFIG = {
     k: v for k, v in LOT_CONFIG.items()
     if v.get("active", False)
 }
+
+ACTIVE_COMMODITIES = list(ACTIVE_LOT_CONFIG.keys())
+
+# Convenience lookups kept for backwards compatibility
+DEFAULT_GOLD_CONTRACT  = "GOLDM"
+DEFAULT_CRUDE_CONTRACT = "CRUDEOILM"
+DEFAULT_COMMODITY_CONTRACT = ACTIVE_COMMODITIES[0] if ACTIVE_COMMODITIES else None
+
+
+def get_active_instrument_symbols() -> list[str]:
+    """Return user-selectable commodity symbols in config order."""
+    return list(ACTIVE_LOT_CONFIG.keys())
+
+
+def get_instrument_config(symbol: str) -> dict:
+    """Return lot/exchange config for a commodity symbol."""
+    return LOT_CONFIG.get(symbol, {})
+
+
+def get_instrument_exchange(symbol: str) -> str:
+    """Return configured exchange for a commodity symbol."""
+    cfg = get_instrument_config(symbol)
+    return cfg.get("exchange", "MCX")
+
+
+def get_exchange_prefix(exchange: str) -> str:
+    """Return exchange prefix used in Groww exchange_trading_symbols."""
+    exchange = (exchange or "MCX").upper()
+    return EXCHANGE_CONFIG.get(exchange, {}).get("prefix", exchange)
+
+
+def build_exchange_trading_symbol(
+    trading_symbol: str,
+    symbol: str = None,
+    exchange: str = None,
+) -> str:
+    """Build e.g. MCX_GOLDM30APR26FUT or NCDEX_GUARSEEDAPR26FUT."""
+    venue = exchange or (get_instrument_exchange(symbol) if symbol else "MCX")
+    return f"{get_exchange_prefix(venue)}_{trading_symbol}"
+
+
+def strip_exchange_prefix(contract_symbol: str) -> str:
+    """Strip a known exchange prefix from an exchange_trading_symbol."""
+    if not contract_symbol:
+        return contract_symbol
+
+    for exchange in EXCHANGE_CONFIG:
+        prefix = f"{get_exchange_prefix(exchange)}_"
+        if contract_symbol.upper().startswith(prefix):
+            return contract_symbol[len(prefix):]
+    return contract_symbol
+
+
+def get_instrument_label(symbol: str, include_exchange: bool = True) -> str:
+    """Format a user-facing commodity label directly from config."""
+    cfg = get_instrument_config(symbol)
+    friendly_name = cfg.get("friendly_name", symbol)
+    icon = cfg.get("ui_icon", "⬢")
+    exchange = cfg.get("exchange")
+    suffix = f" — {exchange}" if include_exchange and exchange else ""
+    return f"{icon} {friendly_name} ({symbol}){suffix}"
 
 # ─────────────────────────────────────────────────────────────────
 # POSITION SIZING FORMULA
@@ -488,6 +563,7 @@ def validate_config() -> list[str]:
     TYPICAL_PRICES = {
         "GOLDM":      71000,    # ₹71,000 per 10g (approx March 2026)
         "CRUDEOILM":  6500,     # ₹6,500 per barrel (approx)
+        "SILVERM":    86000,    # ₹86,000 per kg (approx)
     }
     for symbol in ACTIVE_COMMODITIES:
         cfg = LOT_CONFIG.get(symbol, {})
